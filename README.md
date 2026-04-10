@@ -130,7 +130,7 @@ The first stage of the labeling pipeline performs **automatic labeling** using:
 - **SAM 3** for prompt-based segmentation
 - **YOLO segmentation models** for general or newly introduced classes
 - A **custom YOLO OBB model** trained to identify:
-  - SAM
+  - sam
   - buoy
   - lolo
   - catamaran
@@ -218,10 +218,10 @@ A general summary is provided below.
 
 | Model | Classes | Training Data | Description |
 |---|---|---|---|
-| `yolo_model_2cls_fisheye` | SAM, buoy | Real images with fisheye distortion | Model specialized for real fisheye data, focused only on SAM and buoy detection. |
-| `yolo_model_2cls_mixed` | SAM, buoy | Real and simulated images, with and without fisheye distortion | More general 2-class model for SAM and buoy detection across mixed domains. |
-| `yolo_model_5cls` | SAM, buoy, lolo, catamaran, boats | Real and simulated images, with and without fisheye distortion | Multi-class model for the main marine objects used in the perception pipeline. |
-| `yolo_model_6cls` | SAM, buoy, lolo, catamaran, boats, people | Real and simulated images, with and without fisheye distortion | Extended model including people in addition to the marine object classes. |
+| `yolo_model_2cls_fisheye` | Sam, buoy | Real images with fisheye distortion | Model specialized for real fisheye data, focused only on sam and buoy detection. |
+| `yolo_model_2cls_mixed` | Sam, buoy | Real and simulated images, with and without fisheye distortion | More general 2-class model for sam and buoy detection across mixed domains. |
+| `yolo_model_5cls` | Sam, buoy, lolo, catamaran, boats | Real and simulated images, with and without fisheye distortion | Multi-class model for the main marine objects used in the perception pipeline. |
+| `yolo_model_6cls` | Sam, buoy, lolo, catamaran, boats, people | Real and simulated images, with and without fisheye distortion | Extended model including people in addition to the marine object classes. |
 
 These models can be used directly in the ROS 2 perception pipeline:  
 [alars_auv_perception](https://github.com/moyucrazy12/alars_auv_perception.git)
