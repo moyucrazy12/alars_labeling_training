@@ -1,0 +1,48 @@
+paths:
+  input_dir: "dataset_to_label/images"
+  output_label_dir: "dataset_to_label/labels"
+  output_viz_dir: "dataset_to_label/visualizations_part1"
+
+models:
+  sam3_root: "models/sam3"
+  yolo_seg_model: "models/yolo_models/yoloe-26x-seg.pt"
+  yolo_aux_model: "models/yolo_models/yolo_model_4cls.pt"
+
+runtime:
+  device: 0
+  img_size: 1024
+  conf_thres: 0.25
+  iou_thres: 0.45
+  use_sam3: true
+  sam3_confidence: 0.45
+  save_viz: true
+
+merge:
+  min_mask_area: 20
+  iou_match_thresh: 0.15
+
+classes:
+  name_to_id:
+    sam: 0
+    buoy: 1
+    lolo: 2
+    catamaran: 3
+    boat: 4
+    person: 5
+
+  # YOLO26 is used for these classes
+  yolo26_labels:
+    - boat
+    - person
+
+  # YOLO11 is used for these classes
+  yolo11_labels:
+    - sam
+    - buoy
+    - lolo
+    - catamaran
+
+  # SAM3 prompts are used only for these classes
+  sam3_prompts:
+    - boat
+    - person

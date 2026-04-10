@@ -1,0 +1,13 @@
+path: .
+
+train: images/train
+val: images/val
+test: images/test   # optional, but good to include
+
+names:
+  0: sam
+  1: buoy
+  2: lolo
+  3: catamaran
+  4: boat
+

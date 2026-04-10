@@ -1,0 +1,45 @@
+paths:
+  image_dir: "dataset_to_label/images"
+  label_dir: "dataset_to_label/labels"
+  vis_dir: "dataset_to_label/visualizations_final"
+
+models:
+  sam2_root: "models/sam2"
+  sam2_checkpoint: "models/sam2/checkpoints/sam2.1_hiera_large.pt"
+  sam2_model_cfg: "models/sam2/configs/sam2.1/sam2.1_hiera_l.yaml"
+
+runtime:
+  device: "cuda"
+  min_mask_area: 20
+
+classes:
+  id_to_name:
+    "0": "sam"
+    "1": "buoy"
+    "2": "lolo"
+    "3": "white"
+    "4": "boat"
+    "5": "people"
+
+ui:
+  window_name: "annotator"
+  result_window: "preview"
+
+sam2:
+  enable_amg_fallback: true
+  trackbar_name: "sam_min_area"
+  trackbar_min_area_init: 1500
+  trackbar_min_area_max: 50000
+
+  fallback_max_masks: 120
+  fallback_min_aspect_ratio: 2.0
+  fallback_min_rectangularity: 0.45
+  fallback_max_rectangularity: 1.05
+
+  amg_points_per_side: 32
+  amg_pred_iou_thresh: 0.8
+  amg_stability_score_thresh: 0.92
+  amg_crop_n_layers: 1
+  amg_crop_n_points_downscale_factor: 2
+  amg_box_nms_thresh: 0.7
+  amg_min_mask_region_area: 300
