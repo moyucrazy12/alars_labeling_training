@@ -3,8 +3,7 @@
 ## Overview
 This repository contains the **labeling and training pipeline** used for the ALARS perception system.
 
-In addition to training, this repository is structured as a **ROS 2 resource package (without executables)**.  
-Its role within the ROS 2 workflow is to provide access to trained YOLO models in a standardized way, allowing other packages (e.g., perception) to load them directly using `FindPackageShare`, without manual file handling.
+In addition to training, this repository is structured as a **ROS 2 resource package (without executables)**. Its role within the ROS 2 workflow is to provide access to trained YOLO models in a standardized way, allowing other packages (e.g., perception) to load them directly using `FindPackageShare`, without manual file handling.
 
 It is designed for three main purposes:
 
