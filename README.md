@@ -3,7 +3,7 @@
 ## Overview
 This repository contains the **labeling and training pipeline** used for the ALARS perception system.
 
-In addition to training, this repository is structured as a **ROS 2 resource package (without executables)**. Its role within the ROS 2 workflow is to provide access to trained YOLO models in a standardized way, allowing other packages (e.g., perception) to load them directly using `FindPackageShare`, without manual file handling.
+In addition to training, this repository is structured as a **ROS 2 resource package**. Its role within the ROS 2 workflow is to provide access to trained YOLO models in a standardized way, allowing other packages (e.g., [alars_auv_perception](https://github.com/smarc-project/smarc2/tree/humble/perception/alars/auv_alars_perception)) to load them directly using `FindPackageShare`.
 
 It is designed for three main purposes:
 
@@ -17,8 +17,6 @@ The labeling pipeline is divided into two stages:
 - **Part 2:** Manual correction and refinement using **SAM 2** through an interactive UI.
 
 This separation is useful because the two segmentation models require different environments and dependencies.
-
-The trained YOLO models generated with this repository can later be used in the ROS 2 perception package: [alars_auv_perception](https://github.com/moyucrazy12/alars_auv_perception.git)
 
 ---
 
@@ -239,9 +237,6 @@ A general summary is provided below.
 | `yolo_model_5cls` | Sam, buoy, lolo, catamaran, boats | Real and simulated images, with and without fisheye distortion | Multi-class model for the main marine objects used in the perception pipeline. |
 | `yolo_model_6cls` | Sam, buoy, lolo, catamaran, boats, people | Real and simulated images, with and without fisheye distortion | Extended model including people in addition to the marine object classes. |
 
-These models can be used directly in the ROS 2 perception pipeline:  
-[alars_auv_perception](https://github.com/moyucrazy12/alars_auv_perception.git)
-
 ---
 
 ## Training Process
@@ -291,8 +286,8 @@ The training process is divided into **two stages**:
 This two-stage strategy was chosen to balance training cost and final detection quality.
 
 ### Training Environment
-The training environment is the same as the one described in the perception repository:  
-[alars_auv_perception](https://github.com/moyucrazy12/alars_auv_perception.git)
+The training environment is the same as the one described in the perception package:  
+[alars_auv_perception](https://github.com/smarc-project/smarc2/tree/humble/perception/alars/auv_alars_perception)
 
 ### Run Training
 Start with Stage 1:
