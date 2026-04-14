@@ -37,7 +37,7 @@ Best for **fisheye-camera setups** with maximum accuracy on core classes.
 
 ### Description
 - Classes: `sam`, `buoy`
-- Trained on **real + simulated data**
+- Trained on **real + simulated data**, from normal and fisheye cameras
 
 ### Dataset
 https://kth-my.sharepoint.com/:f:/r/personal/ckmc_ug_kth_se/Documents/training_datasets/real_sim_dataset
@@ -72,8 +72,6 @@ https://kth-my.sharepoint.com/:f:/r/personal/ckmc_ug_kth_se/Documents/training_d
 
 | Metric | Value |
 |--------|------|
-| Precision | 0.909 |
-| Recall | 0.870 |
 | mAP@0.5 | 0.945 |
 | mAP@0.5:0.95 | 0.814 |
 
@@ -103,8 +101,6 @@ https://kth-my.sharepoint.com/:f:/r/personal/ckmc_ug_kth_se/Documents/training_d
 
 | Metric | Value |
 |--------|------|
-| Precision | 0.908 |
-| Recall | 0.867 |
 | mAP@0.5 | 0.918 |
 | mAP@0.5:0.95 | 0.762 |
 
@@ -143,7 +139,7 @@ Use when **full scene understanding (including humans)** is required.
 
 ---
 
-## 🚀 Tip
+## Tip
 
 If your pipeline only needs:
 - navigation targets → use **2-class**
