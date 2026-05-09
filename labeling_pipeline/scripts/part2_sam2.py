@@ -32,7 +32,7 @@ VIS_DIR = PROJECT_ROOT / CFG["paths"]["vis_dir"]
 
 SAM2_ROOT = PROJECT_ROOT / CFG["models"]["sam2_root"]
 SAM2_CHECKPOINT = PROJECT_ROOT / CFG["models"]["sam2_checkpoint"]
-SAM2_MODEL_CFG = PROJECT_ROOT / CFG["models"]["sam2_model_cfg"]
+SAM2_MODEL_CFG = CFG["models"]["sam2_model_cfg"]
 
 DEVICE = CFG["runtime"]["device"]
 
@@ -96,13 +96,15 @@ sam2_mask_generator = None
 # =========================================================
 # GEOMETRY UTILS
 # =========================================================
-def list_images(folder: Path):
-    exts = ("*.jpg", "*.jpeg", "*.png", "*.bmp", "*.webp")
-    files = []
-    for ext in exts:
-        files.extend(folder.glob(ext))
-        files.extend(folder.glob(ext.upper()))
-    return sorted(files)
+def ensure_dir(path: Path):
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def list_images_recursive(folder: Path):
+    exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+    return sorted(
+        [p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in exts]
+    )
 
 
 def order_box_points_clockwise(pts: np.ndarray) -> np.ndarray:
@@ -206,15 +208,25 @@ def find_object_at_point(x, y, objects):
 # =========================================================
 # FILE IO
 # =========================================================
+def get_relative_paths(img_path: Path):
+    rel_path = img_path.relative_to(IMAGE_DIR)
+    label_path = LABEL_DIR / rel_path.with_suffix(".txt")
+    vis_path = VIS_DIR / rel_path.with_name(f"{rel_path.stem}_vis.jpg")
+    return label_path, vis_path
+
+
 def get_label_path(img_path: Path) -> Path:
-    return LABEL_DIR / f"{img_path.stem}.txt"
+    label_path, _ = get_relative_paths(img_path)
+    return label_path
 
 
 def get_vis_path(img_path: Path) -> Path:
-    return VIS_DIR / f"{img_path.stem}_vis.jpg"
+    _, vis_path = get_relative_paths(img_path)
+    return vis_path
 
 
 def save_yolo_obb(txt_path: Path, image_shape, objects):
+    ensure_dir(txt_path.parent)
     h, w = image_shape[:2]
 
     with open(txt_path, "w", encoding="utf-8") as f:
@@ -569,7 +581,8 @@ def load_image_at_index(idx):
         preview = build_result_preview(current_image_bgr, fb["mask"], fb["obb"], fb["class_id"], source="sam2_amg")
         cv2.imshow(RESULT_WINDOW, preview)
 
-    print(f"Loaded image {current_image_index + 1}/{len(image_paths)}: {img_path.name}")
+    rel_img = img_path.relative_to(IMAGE_DIR)
+    print(f"Loaded image {current_image_index + 1}/{len(image_paths)}: {rel_img}")
 
 
 def rerun_auto_proposals():
@@ -600,8 +613,9 @@ def save_current_image():
 
     vis = draw_ui(
         current_image_bgr, [], [], saved_objects, current_class_id,
-        img_path.name, current_image_index, len(image_paths), selected_object_index
+        str(img_path.relative_to(IMAGE_DIR)), current_image_index, len(image_paths), selected_object_index
     )
+    ensure_dir(vis_path.parent)
     cv2.imwrite(str(vis_path), vis)
 
     print(f"Saved labels: {txt_path}")
@@ -621,7 +635,7 @@ def main():
     LABEL_DIR.mkdir(parents=True, exist_ok=True)
     VIS_DIR.mkdir(parents=True, exist_ok=True)
 
-    image_paths = list_images(IMAGE_DIR)
+    image_paths = list_images_recursive(IMAGE_DIR)
     if not image_paths:
         print(f"No images found in {IMAGE_DIR}")
         return
@@ -630,12 +644,13 @@ def main():
     print("[INFO] Image directory:", IMAGE_DIR)
     print("[INFO] Label directory:", LABEL_DIR)
     print("[INFO] Visualization directory:", VIS_DIR)
+    print("[INFO] Number of images found:", len(image_paths))
     print("[INFO] SAM2 root:", SAM2_ROOT)
     print("[INFO] SAM2 cfg:", SAM2_MODEL_CFG)
     print("[INFO] SAM2 checkpoint:", SAM2_CHECKPOINT)
 
     print("Loading SAM2...")
-    sam2_model = build_sam2(str(SAM2_MODEL_CFG), str(SAM2_CHECKPOINT), device=DEVICE)
+    sam2_model = build_sam2(SAM2_MODEL_CFG, str(SAM2_CHECKPOINT), device=DEVICE)
     sam2_predictor = SAM2ImagePredictor(sam2_model)
 
     if ENABLE_AMG_FALLBACK:
@@ -680,14 +695,14 @@ def main():
     load_image_at_index(0)
 
     while True:
-        img_name = image_paths[current_image_index].name
+        rel_name = str(image_paths[current_image_index].relative_to(IMAGE_DIR))
         vis = draw_ui(
             current_image_bgr,
             points,
             point_labels,
             saved_objects,
             current_class_id,
-            img_name,
+            rel_name,
             current_image_index,
             len(image_paths),
             selected_object_index

@@ -184,6 +184,18 @@ This tool provides an interactive UI where the user can:
 
 This makes manual labeling much faster than drawing all boxes from scratch.
 
+### Before running Part 1
+Make sure that:
+
+- The required model is stored in the correct folder, especially:
+  - `models/sam2`
+- Your custom YOLO models are available there.
+- The images and labels to check are located in:
+  - `dataset_to_label/images/`
+  - `dataset_to_label/labels/`
+- The desired classes and confidence thresholds are configured in:
+  - `part2_parameters.yaml`
+
 ### Run Part 2
 ```bash
 conda deactivate

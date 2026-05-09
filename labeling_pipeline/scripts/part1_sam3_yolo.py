@@ -2,7 +2,6 @@
 
 import os
 import sys
-import glob
 import yaml
 import cv2
 import numpy as np
@@ -83,12 +82,18 @@ def ensure_dir(path: Path):
     path.mkdir(parents=True, exist_ok=True)
 
 
-def list_images(folder: Path):
-    exts = ("*.jpg", "*.jpeg", "*.png", "*.bmp", "*.webp")
-    files = []
-    for ext in exts:
-        files.extend(folder.glob(ext))
-    return sorted(files)
+def list_images_recursive(folder: Path):
+    exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+    return sorted(
+        [p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in exts]
+    )
+
+
+def get_relative_output_paths(img_path: Path, input_root: Path, label_root: Path, viz_root: Path):
+    rel_path = img_path.relative_to(input_root)
+    txt_path = label_root / rel_path.with_suffix(".txt")
+    viz_path = viz_root / rel_path.with_suffix(".jpg")
+    return txt_path, viz_path
 
 
 def normalize_points(points_xy: np.ndarray, w: int, h: int):
@@ -158,6 +163,7 @@ def resize_mask(mask: np.ndarray, image_shape):
 
 
 def save_yolo_obb_txt(txt_path: Path, rows):
+    ensure_dir(txt_path.parent)
     with open(txt_path, "w", encoding="utf-8") as f:
         for class_id, pts_norm in rows:
             vals = [str(class_id)] + [f"{v:.6f}" for v in pts_norm.reshape(-1)]
@@ -267,7 +273,6 @@ def get_yolo_aux_obbs(model: YOLO, image_bgr: np.ndarray):
     r = results[0].cpu()
     names = model.names
 
-    # Case 1: segmentation output
     if r.boxes is not None and r.masks is not None:
         try:
             masks_np = r.masks.data.numpy()
@@ -301,7 +306,6 @@ def get_yolo_aux_obbs(model: YOLO, image_bgr: np.ndarray):
 
         return detections
 
-    # Case 2: OBB output
     if getattr(r, "obb", None) is not None and r.obb is not None:
         obb_obj = r.obb
         cls_arr = obb_obj.cls.numpy()
@@ -329,7 +333,6 @@ def get_yolo_aux_obbs(model: YOLO, image_bgr: np.ndarray):
 
         return detections
 
-    # Case 3: regular boxes output
     if r.boxes is not None:
         boxes_xyxy = r.boxes.xyxy.numpy()
         cls_arr = r.boxes.cls.numpy()
@@ -412,7 +415,6 @@ class Sam3BatchSegmenter:
 
 # ============================================================
 # MERGING
-# YOLO26 + SAM3 only for classes in SAM3 prompts
 # ============================================================
 def merge_yolo_sam(yolo_dets, sam_dets, image_shape):
     final_dets = []
@@ -511,7 +513,7 @@ def main():
     if SAVE_VIZ:
         ensure_dir(OUTPUT_VIZ_DIR)
 
-    image_paths = list_images(DATASET_DIR)
+    image_paths = list_images_recursive(DATASET_DIR)
     if not image_paths:
         print(f"[WARN] No images found in {DATASET_DIR}")
         return
@@ -520,6 +522,7 @@ def main():
     print("[INFO] Input directory:", DATASET_DIR)
     print("[INFO] Output labels:", OUTPUT_LABEL_DIR)
     print("[INFO] Output visualizations:", OUTPUT_VIZ_DIR)
+    print("[INFO] Number of images found:", len(image_paths))
     print("[INFO] YOLO26 model (boat/person):", YOLO_SEG_MODEL_PATH)
     print("[INFO] YOLO11 model (sam/buoy/lolo/catamaran):", YOLO_AUX_MODEL_PATH)
     print("[INFO] SAM3 root:", SAM3_ROOT)
@@ -536,7 +539,8 @@ def main():
         sam3_segmenter = Sam3BatchSegmenter()
 
     for img_path in image_paths:
-        print(f"[INFO] Processing {img_path.name}")
+        rel_img = img_path.relative_to(DATASET_DIR)
+        print(f"[INFO] Processing {rel_img}")
 
         image_bgr = cv2.imread(str(img_path))
         if image_bgr is None:
@@ -546,10 +550,8 @@ def main():
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         pil_image = Image.fromarray(image_rgb)
 
-        # Part A: YOLO26 segmentation for boat/person
         yolo_seg_dets = get_yolo_seg_masks(yolo_seg_model, image_bgr)
 
-        # Part B: SAM3 prompts for boat/person
         sam_dets = []
         if sam3_segmenter is not None:
             for prompt in SAM3_PROMPTS:
@@ -562,26 +564,24 @@ def main():
                 )
                 sam_dets.extend(prompt_dets)
 
-        # Merge boat/person branch
         merged_mask_dets = merge_yolo_sam(yolo_seg_dets, sam_dets, image_bgr.shape)
         mask_rows, mask_viz_dets = convert_mask_detections_to_obb(merged_mask_dets, image_bgr.shape)
 
-        # Part C: YOLO11 branch for sam/buoy/lolo/catamaran
         aux_dets = get_yolo_aux_obbs(yolo_aux_model, image_bgr)
         aux_rows, aux_viz_dets = convert_direct_obb_detections(aux_dets, image_bgr.shape)
 
-        # Combine outputs
         all_rows = mask_rows + aux_rows
         all_viz_dets = mask_viz_dets + aux_viz_dets
 
-        # Save labels
-        txt_path = OUTPUT_LABEL_DIR / f"{img_path.stem}.txt"
+        txt_path, viz_path = get_relative_output_paths(
+            img_path, DATASET_DIR, OUTPUT_LABEL_DIR, OUTPUT_VIZ_DIR
+        )
+
         save_yolo_obb_txt(txt_path, all_rows)
 
-        # Save visualization
         if SAVE_VIZ:
+            ensure_dir(viz_path.parent)
             viz = draw_overlay(image_bgr, all_viz_dets)
-            viz_path = OUTPUT_VIZ_DIR / f"{img_path.stem}.jpg"
             cv2.imwrite(str(viz_path), viz)
 
     print("[DONE] Finished.")

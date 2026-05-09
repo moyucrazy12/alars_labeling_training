@@ -6,7 +6,7 @@ paths:
 models:
   sam2_root: "models/sam2"
   sam2_checkpoint: "models/sam2/checkpoints/sam2.1_hiera_large.pt"
-  sam2_model_cfg: "models/sam2/configs/sam2.1/sam2.1_hiera_l.yaml"
+  sam2_model_cfg: "configs/sam2.1/sam2.1_hiera_l.yaml"
 
 runtime:
   device: "cuda"
