@@ -111,6 +111,8 @@ git clone https://github.com/facebookresearch/sam2.git
 cd sam2
 pip install -e .
 ```
+> [!NOTE]
+> After installing the requirements in the conda environment, you may encounter a dependency issue related to Ultralytics. However, this part of the pipeline does not require it, so you can safely continue with the next steps.
 
 ### 3. Download the checkpoints
 All checkpoints can be downloaded with:
