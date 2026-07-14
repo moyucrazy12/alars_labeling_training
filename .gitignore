@@ -1,2 +1,3 @@
 labeling_pipeline/models/yolo_models/*.pt
 labeling_pipeline/.venv_dino/
+labeling_pipeline/dataset_to_label/
