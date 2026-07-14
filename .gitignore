@@ -1,1 +1,2 @@
 labeling_pipeline/models/yolo_models/*.pt
+labeling_pipeline/.venv_dino/
