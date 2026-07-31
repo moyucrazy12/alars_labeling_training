@@ -17,6 +17,17 @@ The repository is organized into four main parts:
 - `training_pipeline/`: dataset merge/split, YOLO training, testing, and model export tools.
 - `trained_models/`: exported YOLO models used by the ALARS perception system.
 
+## Main trained models
+
+The repository currently includes two main YOLO OBB models in `trained_models/`:
+
+| Model | Classes | Status |
+|---|---|---|
+| `yolo_model_2cls_may.pt` | `sam`, `buoy` | Two-class model used for the Djuro demonstration and tested in Askö. |
+| `yolo_model_4cls_july.pt` | `sam`, `buoy`, `hook`, `landing_pad` | Extended four-class model. It has been tested in simulation so far. |
+
+These models are intended to be loaded by the ALARS perception system through the ROS 2 package share path.
+
 ## Docker requirements
 
 Install:
