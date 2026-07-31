@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 import os
 import sys
 import yaml
@@ -11,69 +12,242 @@ from pathlib import Path
 from PIL import Image
 from ultralytics import YOLO
 
-
 # ============================================================
-# PATHS
+# PATHS / CONFIG LOADING
 # ============================================================
 SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent
-CONFIG_PATH = PROJECT_ROOT / "config" / "part1_parameters.yaml"
+PIPELINE_ROOT = SCRIPT_DIR.parent
+REPO_ROOT = PIPELINE_ROOT.parent
+PROJECT_ROOT = PIPELINE_ROOT
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "part_parameters.yaml"
 
+CONFIG_PATH = DEFAULT_CONFIG_PATH
+CFG = {}
+
+DATASET_DIR = None
+OUTPUT_LABEL_DIR = None
+OUTPUT_VIZ_DIR = None
+
+YOLO26_MODEL_PATH = None
+YOLO11_MODEL_PATH = None
+SAM3_ROOT = None
+
+DEVICE = 0
+IMG_SIZE = 1024
+IOU_THRES = 0.45
+SAVE_VIZ = True
+
+LEGACY_CONFIDENCE = 0.45
+LABEL_WRITE_MODE = "append_unique"
+
+MIN_MASK_AREA = 20
+IOU_MATCH_THRESH = 0.15
+
+CLASS_ID_TO_NAME = {}
+CLASS_NAME_TO_ID = {}
+
+USE_YOLO26 = False
+YOLO26_CONFIDENCE = 0.45
+YOLO26_LABELS = set()
+
+USE_YOLO11 = False
+YOLO11_CONFIDENCE = 0.45
+YOLO11_LABELS = set()
+
+USE_SAM3 = False
+SAM3_CONFIDENCE = 0.45
+SAM3_PROMPTS = []
 
 # ============================================================
 # CONFIG LOADING
 # ============================================================
+def resolve_config_path(config_path_arg) -> Path:
+    """
+    Resolve config paths in a forgiving way.
+
+    Supports:
+      --config labeling_pipeline/config/<file>.yaml
+      --config config/<file>.yaml
+      --config /absolute/path/to/<file>.yaml
+    """
+    path = Path(config_path_arg).expanduser()
+
+    if path.is_absolute():
+        return path
+
+    candidates = [
+        Path.cwd() / path,
+        REPO_ROOT / path,
+        PROJECT_ROOT / path,
+    ]
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+
+    # Return the root-relative path for a clear FileNotFoundError.
+    return (Path.cwd() / path).resolve()
+
+
+def resolve_project_path(path_value) -> Path:
+    """
+    Resolve paths from the YAML.
+
+    Paths like:
+      dataset_to_label/images
+      models/sam2
+    are interpreted relative to labeling_pipeline/.
+
+    Paths like:
+      labeling_pipeline/dataset_to_label/images
+    are interpreted relative to the repository root.
+    """
+    path = Path(path_value).expanduser()
+
+    if path.is_absolute():
+        return path
+
+    candidates = [
+        Path.cwd() / path,
+        REPO_ROOT / path,
+        PROJECT_ROOT / path,
+    ]
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+
+    if path.parts and path.parts[0] == "labeling_pipeline":
+        return (REPO_ROOT / path).resolve()
+
+    return (PROJECT_ROOT / path).resolve()
+
+
 def load_yaml(path: Path) -> dict:
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
+def validate_configured_classes(section_name: str, class_names):
+    unknown = sorted(set(class_names) - set(CLASS_NAME_TO_ID))
+    if unknown:
+        raise ValueError(
+            f"Unknown class names in {section_name}: {unknown}. "
+            "Add them to classes.id_to_name first."
+        )
 
-CFG = load_yaml(CONFIG_PATH)
+def validate_confidence(name: str, value: float):
+    if not 0.0 <= value <= 1.0:
+        raise ValueError(f"{name} must be between 0.0 and 1.0, got {value}")
 
-DATASET_DIR = PROJECT_ROOT / CFG["paths"]["input_dir"]
-OUTPUT_LABEL_DIR = PROJECT_ROOT / CFG["paths"]["output_label_dir"]
-OUTPUT_VIZ_DIR = PROJECT_ROOT / CFG["paths"]["output_viz_dir"]
+def load_config(config_path: Path):
+    global CONFIG_PATH, CFG
+    global DATASET_DIR, OUTPUT_LABEL_DIR, OUTPUT_VIZ_DIR
+    global YOLO26_MODEL_PATH, YOLO11_MODEL_PATH, SAM3_ROOT
+    global DEVICE, IMG_SIZE, IOU_THRES, SAVE_VIZ
+    global LEGACY_CONFIDENCE, LABEL_WRITE_MODE
+    global MIN_MASK_AREA, IOU_MATCH_THRESH
+    global CLASS_ID_TO_NAME, CLASS_NAME_TO_ID
+    global USE_YOLO26, YOLO26_CONFIDENCE, YOLO26_LABELS
+    global USE_YOLO11, YOLO11_CONFIDENCE, YOLO11_LABELS
+    global USE_SAM3, SAM3_CONFIDENCE, SAM3_PROMPTS
 
-YOLO_SEG_MODEL_PATH = PROJECT_ROOT / CFG["models"]["yolo_seg_model"]
-YOLO_AUX_MODEL_PATH = PROJECT_ROOT / CFG["models"]["yolo_aux_model"]
-SAM3_ROOT = PROJECT_ROOT / CFG["models"]["sam3_root"]
+    CONFIG_PATH = resolve_config_path(config_path)
+    CFG = load_yaml(CONFIG_PATH)
 
-DEVICE = CFG["runtime"]["device"]
-IMG_SIZE = int(CFG["runtime"]["img_size"])
-CONF_THRES = float(CFG["runtime"]["conf_thres"])
-IOU_THRES = float(CFG["runtime"]["iou_thres"])
+    DATASET_DIR = resolve_project_path(CFG["paths"]["input_dir"])
+    OUTPUT_LABEL_DIR = resolve_project_path(CFG["paths"]["output_label_dir"])
+    OUTPUT_VIZ_DIR = resolve_project_path(CFG["paths"].get("output_viz_dir", "visualizations_part1"))
 
-USE_SAM3 = bool(CFG["runtime"]["use_sam3"])
-SAM3_CONFIDENCE = float(CFG["runtime"]["sam3_confidence"])
-SAVE_VIZ = bool(CFG["runtime"]["save_viz"])
+    YOLO26_MODEL_PATH = resolve_project_path(CFG["models"]["yolo26_model"])
+    YOLO11_MODEL_PATH = resolve_project_path(CFG["models"]["yolo11_model"])
+    SAM3_ROOT = resolve_project_path(CFG["models"]["sam3_root"])
 
-MIN_MASK_AREA = int(CFG["merge"]["min_mask_area"])
-IOU_MATCH_THRESH = float(CFG["merge"]["iou_match_thresh"])
+    runtime_cfg = CFG.get("runtime", {})
+    DEVICE = runtime_cfg.get("device", 0)
+    IMG_SIZE = int(runtime_cfg.get("img_size", 1024))
+    IOU_THRES = float(runtime_cfg.get("iou_thres", 0.45))
+    SAVE_VIZ = bool(runtime_cfg.get("save_viz", True))
 
-CLASS_NAME_TO_ID = dict(CFG["classes"]["name_to_id"])
+    # Keep backward compatibility with older configs that used
+    # runtime.conf_thres as one shared YOLO confidence threshold.
+    LEGACY_CONFIDENCE = float(runtime_cfg.get("conf_thres", 0.45))
 
-YOLO_SEG_LABELS = set(CFG["classes"]["yolo26_labels"])
-YOLO_AUX_LABELS = set(CFG["classes"]["yolo11_labels"])
-SAM3_PROMPTS = list(CFG["classes"]["sam3_prompts"])
+    LABEL_WRITE_MODE = str(
+        CFG.get("output", {}).get("label_write_mode", "append_unique")
+    ).lower().strip()
+    if LABEL_WRITE_MODE not in {"overwrite", "append", "append_unique"}:
+        raise ValueError(
+            "output.label_write_mode must be one of: "
+            "overwrite, append, append_unique"
+        )
 
+    MIN_MASK_AREA = int(CFG["merge"].get("min_mask_area", 20))
+    IOU_MATCH_THRESH = float(CFG["merge"].get("iou_match_thresh", 0.15))
+
+    CLASS_ID_TO_NAME = {
+        int(class_id): str(class_name).lower().strip()
+        for class_id, class_name in CFG["classes"]["id_to_name"].items()
+    }
+    CLASS_NAME_TO_ID = {
+        class_name: class_id for class_id, class_name in CLASS_ID_TO_NAME.items()
+    }
+
+    if len(CLASS_NAME_TO_ID) != len(CLASS_ID_TO_NAME):
+        raise ValueError("Class names in classes.id_to_name must be unique")
+
+    yolo26_cfg = CFG.get("yolo26", {})
+    USE_YOLO26 = bool(yolo26_cfg.get("enabled", False))
+    YOLO26_CONFIDENCE = float(yolo26_cfg.get("confidence", LEGACY_CONFIDENCE))
+    YOLO26_LABELS = {
+        str(label).lower().strip() for label in yolo26_cfg.get("labels", [])
+    }
+
+    yolo11_cfg = CFG.get("yolo11", {})
+    USE_YOLO11 = bool(yolo11_cfg.get("enabled", False))
+    YOLO11_CONFIDENCE = float(yolo11_cfg.get("confidence", LEGACY_CONFIDENCE))
+    YOLO11_LABELS = {
+        str(label).lower().strip() for label in yolo11_cfg.get("labels", [])
+    }
+
+    sam3_cfg = CFG.get("sam3", {})
+    USE_SAM3 = bool(sam3_cfg.get("enabled", False))
+    SAM3_CONFIDENCE = float(sam3_cfg.get("confidence", LEGACY_CONFIDENCE))
+    SAM3_PROMPTS = [
+        str(prompt).lower().strip() for prompt in sam3_cfg.get("prompts", [])
+    ]
+
+    validate_configured_classes("yolo26.labels", YOLO26_LABELS)
+    validate_configured_classes("yolo11.labels", YOLO11_LABELS)
+    validate_configured_classes("sam3.prompts", SAM3_PROMPTS)
+
+    validate_confidence("yolo26.confidence", YOLO26_CONFIDENCE)
+    validate_confidence("yolo11.confidence", YOLO11_CONFIDENCE)
+    validate_confidence("sam3.confidence", SAM3_CONFIDENCE)
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Part 1 automatic labeling with YOLO/SAM3 and YOLO OBB labels."
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG_PATH,
+        help="Path to the YAML config file."
+    )
+    return parser.parse_args()
 
 # ============================================================
 # TORCH / SAM3 SETUP
 # ============================================================
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
+def configure_torch():
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
-if torch.cuda.is_available():
-    torch.autocast("cuda", dtype=torch.bfloat16).__enter__()
-torch.inference_mode().__enter__()
+    if torch.cuda.is_available():
+        torch.autocast("cuda", dtype=torch.bfloat16).__enter__()
+    torch.inference_mode().__enter__()
 
-# Make local SAM3 repo importable
-sys.path.insert(0, str(SAM3_ROOT))
-
-import sam3  # noqa: E402
-from sam3 import build_sam3_image_model  # noqa: E402
-from sam3.model.sam3_image_processor import Sam3Processor  # noqa: E402
-
+# SAM3 is imported lazily inside Sam3BatchSegmenter only when enabled.
 
 # ============================================================
 # UTILS
@@ -81,20 +255,17 @@ from sam3.model.sam3_image_processor import Sam3Processor  # noqa: E402
 def ensure_dir(path: Path):
     path.mkdir(parents=True, exist_ok=True)
 
-
 def list_images_recursive(folder: Path):
     exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
     return sorted(
         [p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in exts]
     )
 
-
 def get_relative_output_paths(img_path: Path, input_root: Path, label_root: Path, viz_root: Path):
     rel_path = img_path.relative_to(input_root)
     txt_path = label_root / rel_path.with_suffix(".txt")
     viz_path = viz_root / rel_path.with_suffix(".jpg")
     return txt_path, viz_path
-
 
 def normalize_points(points_xy: np.ndarray, w: int, h: int):
     pts = points_xy.astype(np.float32).copy()
@@ -103,7 +274,6 @@ def normalize_points(points_xy: np.ndarray, w: int, h: int):
     pts[:, 0] = np.clip(pts[:, 0], 0.0, 1.0)
     pts[:, 1] = np.clip(pts[:, 1], 0.0, 1.0)
     return pts
-
 
 def order_corners_clockwise(pts: np.ndarray):
     center = np.mean(pts, axis=0)
@@ -116,7 +286,6 @@ def order_corners_clockwise(pts: np.ndarray):
     pts = np.roll(pts, -start_idx, axis=0)
     return pts
 
-
 def xyxy_to_obb(xyxy: np.ndarray):
     x1, y1, x2, y2 = xyxy.astype(np.float32)
     pts = np.array([
@@ -126,7 +295,6 @@ def xyxy_to_obb(xyxy: np.ndarray):
         [x1, y2],
     ], dtype=np.float32)
     return order_corners_clockwise(pts)
-
 
 def mask_to_obb(mask: np.ndarray):
     mask_u8 = (mask > 0).astype(np.uint8) * 255
@@ -144,7 +312,6 @@ def mask_to_obb(mask: np.ndarray):
     box = order_corners_clockwise(box)
     return box.astype(np.float32), area
 
-
 def mask_iou(mask_a: np.ndarray, mask_b: np.ndarray):
     a = mask_a > 0
     b = mask_b > 0
@@ -154,21 +321,84 @@ def mask_iou(mask_a: np.ndarray, mask_b: np.ndarray):
         return 0.0
     return inter / union
 
-
 def resize_mask(mask: np.ndarray, image_shape):
     h, w = image_shape[:2]
     if mask.shape[:2] != (h, w):
         mask = cv2.resize(mask.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
     return (mask > 0).astype(np.uint8)
 
+def format_yolo_obb_row(class_id: int, pts_norm: np.ndarray) -> str:
+    vals = [str(class_id)] + [f"{v:.6f}" for v in pts_norm.reshape(-1)]
+    return " ".join(vals)
+
+def canonicalize_yolo_obb_line(line: str):
+    """Return a normalized representation used for exact duplicate checks."""
+    parts = line.strip().split()
+    if not parts:
+        return None
+
+    try:
+        class_id = int(float(parts[0]))
+        coords = [float(value) for value in parts[1:]]
+    except ValueError:
+        # Preserve malformed or non-standard existing lines without treating
+        # them as generated detections.
+        return line.strip()
+
+    if len(coords) != 8:
+        return line.strip()
+
+    return " ".join(
+        [str(class_id)] + [f"{value:.6f}" for value in coords]
+    )
 
 def save_yolo_obb_txt(txt_path: Path, rows):
+    """Save detections according to output.label_write_mode.
+    Modes:
+      overwrite: replace the existing annotation file.
+      append: add every generated detection to the existing file.
+      append_unique: preserve existing annotations and add only rows that are not already present after normalization to six decimals.
+    """
     ensure_dir(txt_path.parent)
-    with open(txt_path, "w", encoding="utf-8") as f:
-        for class_id, pts_norm in rows:
-            vals = [str(class_id)] + [f"{v:.6f}" for v in pts_norm.reshape(-1)]
-            f.write(" ".join(vals) + "\n")
+    new_lines = [format_yolo_obb_row(class_id, pts_norm) for class_id, pts_norm in rows]
 
+    if LABEL_WRITE_MODE == "overwrite":
+        with open(txt_path, "w", encoding="utf-8") as f:
+            for line in new_lines:
+                f.write(line + "\n")
+        return len(new_lines)
+
+    existing_text = ""
+    if txt_path.exists():
+        existing_text = txt_path.read_text(encoding="utf-8")
+
+    if LABEL_WRITE_MODE == "append_unique":
+        existing_rows = {
+            canonical
+            for line in existing_text.splitlines()
+            if (canonical := canonicalize_yolo_obb_line(line)) is not None
+        }
+
+        filtered_lines = []
+        for line in new_lines:
+            canonical = canonicalize_yolo_obb_line(line)
+            if canonical in existing_rows:
+                continue
+            existing_rows.add(canonical)
+            filtered_lines.append(line)
+        new_lines = filtered_lines
+
+    if not new_lines:
+        return 0
+
+    needs_leading_newline = bool(existing_text) and not existing_text.endswith("\n")
+    with open(txt_path, "a", encoding="utf-8") as f:
+        if needs_leading_newline:
+            f.write("\n")
+        for line in new_lines:
+            f.write(line + "\n")
+
+    return len(new_lines)
 
 def draw_overlay(image: np.ndarray, detections: list):
     out = image.copy()
@@ -196,7 +426,6 @@ def draw_overlay(image: np.ndarray, detections: list):
 
     return out
 
-
 # ============================================================
 # YOLO 26 SEGMENTATION MODEL
 # ============================================================
@@ -204,7 +433,7 @@ def get_yolo_seg_masks(model: YOLO, image_bgr: np.ndarray):
     results = model.predict(
         source=image_bgr,
         imgsz=IMG_SIZE,
-        conf=CONF_THRES,
+        conf=YOLO26_CONFIDENCE,
         iou=IOU_THRES,
         device=DEVICE,
         verbose=False
@@ -230,7 +459,7 @@ def get_yolo_seg_masks(model: YOLO, image_bgr: np.ndarray):
         conf = float(r.boxes.conf[i].item())
         cls_name = str(names[cls_id]).lower().strip()
 
-        if cls_name not in YOLO_SEG_LABELS:
+        if cls_name not in YOLO26_LABELS:
             continue
         if cls_name not in CLASS_NAME_TO_ID:
             continue
@@ -251,7 +480,6 @@ def get_yolo_seg_masks(model: YOLO, image_bgr: np.ndarray):
 
     return detections
 
-
 # ============================================================
 # YOLO 11 MODEL
 # Supports seg / obb / boxes
@@ -260,7 +488,7 @@ def get_yolo_aux_obbs(model: YOLO, image_bgr: np.ndarray):
     results = model.predict(
         source=image_bgr,
         imgsz=IMG_SIZE,
-        conf=CONF_THRES,
+        conf=YOLO11_CONFIDENCE,
         iou=IOU_THRES,
         device=DEVICE,
         verbose=False
@@ -284,7 +512,7 @@ def get_yolo_aux_obbs(model: YOLO, image_bgr: np.ndarray):
             conf = float(r.boxes.conf[i].item())
             cls_name = str(names[cls_id]).lower().strip()
 
-            if cls_name not in YOLO_AUX_LABELS:
+            if cls_name not in YOLO11_LABELS:
                 continue
             if cls_name not in CLASS_NAME_TO_ID:
                 continue
@@ -317,7 +545,7 @@ def get_yolo_aux_obbs(model: YOLO, image_bgr: np.ndarray):
             conf = float(conf_arr[i])
             cls_name = str(names[cls_id]).lower().strip()
 
-            if cls_name not in YOLO_AUX_LABELS:
+            if cls_name not in YOLO11_LABELS:
                 continue
             if cls_name not in CLASS_NAME_TO_ID:
                 continue
@@ -343,7 +571,7 @@ def get_yolo_aux_obbs(model: YOLO, image_bgr: np.ndarray):
             conf = float(conf_arr[i])
             cls_name = str(names[cls_id]).lower().strip()
 
-            if cls_name not in YOLO_AUX_LABELS:
+            if cls_name not in YOLO11_LABELS:
                 continue
             if cls_name not in CLASS_NAME_TO_ID:
                 continue
@@ -361,16 +589,23 @@ def get_yolo_aux_obbs(model: YOLO, image_bgr: np.ndarray):
 
     return detections
 
-
 # ============================================================
 # SAM3
 # ============================================================
 class Sam3BatchSegmenter:
-    def __init__(self):
-        sam3_root = os.path.join(os.path.dirname(sam3.__file__), "..")
-        bpe_path = f"{sam3_root}/assets/bpe_simple_vocab_16e6.txt.gz"
+    def __init__(self, sam3_repo_root: Path):
+        # Do not require SAM3 to be installed/importable when it is disabled.
+        sys.path.insert(0, str(sam3_repo_root))
 
-        self.model = build_sam3_image_model(bpe_path=bpe_path)
+        # Import SAM3 lazily to avoid requiring it when not used.
+        import sam3
+        from sam3 import build_sam3_image_model
+        from sam3.model.sam3_image_processor import Sam3Processor
+
+        installed_sam3_root = Path(sam3.__file__).resolve().parent.parent
+        bpe_path = installed_sam3_root / "assets" / "bpe_simple_vocab_16e6.txt.gz"
+
+        self.model = build_sam3_image_model(bpe_path=str(bpe_path))
         self.processor = Sam3Processor(self.model)
 
     def segment_prompt(self, pil_image, prompt, conf_thresh=0.45):
@@ -411,7 +646,6 @@ class Sam3BatchSegmenter:
             })
 
         return detections
-
 
 # ============================================================
 # MERGING
@@ -458,7 +692,6 @@ def merge_yolo_sam(yolo_dets, sam_dets, image_shape):
 
     return final_dets
 
-
 def convert_mask_detections_to_obb(detections, image_shape):
     h, w = image_shape[:2]
     rows = []
@@ -483,7 +716,6 @@ def convert_mask_detections_to_obb(detections, image_shape):
 
     return rows, kept
 
-
 def convert_direct_obb_detections(detections, image_shape):
     h, w = image_shape[:2]
     rows = []
@@ -504,11 +736,14 @@ def convert_direct_obb_detections(detections, image_shape):
 
     return rows, kept
 
-
 # ============================================================
 # MAIN
 # ============================================================
 def main():
+    args = parse_args()
+    load_config(args.config)
+    configure_torch()
+
     ensure_dir(OUTPUT_LABEL_DIR)
     if SAVE_VIZ:
         ensure_dir(OUTPUT_VIZ_DIR)
@@ -521,22 +756,41 @@ def main():
     print("[INFO] Configuration loaded from:", CONFIG_PATH)
     print("[INFO] Input directory:", DATASET_DIR)
     print("[INFO] Output labels:", OUTPUT_LABEL_DIR)
-    print("[INFO] Output visualizations:", OUTPUT_VIZ_DIR)
+    print("[INFO] Save visualizations:", SAVE_VIZ)
+    if SAVE_VIZ:
+        print("[INFO] Output visualizations:", OUTPUT_VIZ_DIR)
+    print("[INFO] Label write mode:", LABEL_WRITE_MODE)
     print("[INFO] Number of images found:", len(image_paths))
-    print("[INFO] YOLO26 model (boat/person):", YOLO_SEG_MODEL_PATH)
-    print("[INFO] YOLO11 model (sam/buoy/lolo/catamaran):", YOLO_AUX_MODEL_PATH)
-    print("[INFO] SAM3 root:", SAM3_ROOT)
+    print(
+        f"[INFO] YOLO26 enabled: {USE_YOLO26}; "
+        f"confidence: {YOLO26_CONFIDENCE}; labels: {sorted(YOLO26_LABELS)}"
+    )
+    print(
+        f"[INFO] YOLO11 enabled: {USE_YOLO11}; "
+        f"confidence: {YOLO11_CONFIDENCE}; labels: {sorted(YOLO11_LABELS)}"
+    )
+    print(
+        f"[INFO] SAM3 enabled: {USE_SAM3}; "
+        f"confidence: {SAM3_CONFIDENCE}; prompts: {SAM3_PROMPTS}"
+    )
 
-    print("[INFO] Loading YOLO26 segmentation model...")
-    yolo_seg_model = YOLO(str(YOLO_SEG_MODEL_PATH))
+    if not any((USE_YOLO26, USE_YOLO11, USE_SAM3)):
+        raise ValueError("At least one of yolo26, yolo11, or sam3 must be enabled")
 
-    print("[INFO] Loading YOLO11 auxiliary model...")
-    yolo_aux_model = YOLO(str(YOLO_AUX_MODEL_PATH))
+    yolo26_model = None
+    if USE_YOLO26:
+        print("[INFO] Loading YOLO26 segmentation model:", YOLO26_MODEL_PATH)
+        yolo26_model = YOLO(str(YOLO26_MODEL_PATH))
+
+    yolo11_model = None
+    if USE_YOLO11:
+        print("[INFO] Loading YOLO11 auxiliary model:", YOLO11_MODEL_PATH)
+        yolo11_model = YOLO(str(YOLO11_MODEL_PATH))
 
     sam3_segmenter = None
     if USE_SAM3:
-        print("[INFO] Loading SAM3...")
-        sam3_segmenter = Sam3BatchSegmenter()
+        print("[INFO] Loading SAM3 from:", SAM3_ROOT)
+        sam3_segmenter = Sam3BatchSegmenter(SAM3_ROOT)
 
     for img_path in image_paths:
         rel_img = img_path.relative_to(DATASET_DIR)
@@ -547,16 +801,16 @@ def main():
             print(f"[WARN] Could not read {img_path}")
             continue
 
-        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        pil_image = Image.fromarray(image_rgb)
-
-        yolo_seg_dets = get_yolo_seg_masks(yolo_seg_model, image_bgr)
+        yolo_seg_dets = []
+        if yolo26_model is not None:
+            yolo_seg_dets = get_yolo_seg_masks(yolo26_model, image_bgr)
 
         sam_dets = []
         if sam3_segmenter is not None:
+            image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+            pil_image = Image.fromarray(image_rgb)
+
             for prompt in SAM3_PROMPTS:
-                if prompt not in CLASS_NAME_TO_ID:
-                    continue
                 prompt_dets = sam3_segmenter.segment_prompt(
                     pil_image,
                     prompt,
@@ -567,7 +821,9 @@ def main():
         merged_mask_dets = merge_yolo_sam(yolo_seg_dets, sam_dets, image_bgr.shape)
         mask_rows, mask_viz_dets = convert_mask_detections_to_obb(merged_mask_dets, image_bgr.shape)
 
-        aux_dets = get_yolo_aux_obbs(yolo_aux_model, image_bgr)
+        aux_dets = []
+        if yolo11_model is not None:
+            aux_dets = get_yolo_aux_obbs(yolo11_model, image_bgr)
         aux_rows, aux_viz_dets = convert_direct_obb_detections(aux_dets, image_bgr.shape)
 
         all_rows = mask_rows + aux_rows
@@ -577,7 +833,9 @@ def main():
             img_path, DATASET_DIR, OUTPUT_LABEL_DIR, OUTPUT_VIZ_DIR
         )
 
-        save_yolo_obb_txt(txt_path, all_rows)
+        added_rows = save_yolo_obb_txt(txt_path, all_rows)
+        if LABEL_WRITE_MODE != "overwrite":
+            print(f"[INFO] Added {added_rows} new label row(s) to {txt_path.name}")
 
         if SAVE_VIZ:
             ensure_dir(viz_path.parent)
@@ -585,7 +843,6 @@ def main():
             cv2.imwrite(str(viz_path), viz)
 
     print("[DONE] Finished.")
-
 
 if __name__ == "__main__":
     main()

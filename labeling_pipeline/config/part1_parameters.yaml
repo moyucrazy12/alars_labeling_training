@@ -5,40 +5,51 @@ paths:
 
 models:
   sam3_root: "models/sam3"
-  yolo_seg_model: "models/yolo_models/yoloe-26x-seg.pt"
-  yolo_aux_model: "models/yolo_models/yolo_model_4cls_new.pt"
+  yolo26_model: "models/yolo_models/yoloe-26x-seg.pt"
+  yolo11_model: "models/yolo_models/yolo_model_4cls_july.pt"
 
 runtime:
   device: 0
   img_size: 1024
-  conf_thres: 0.45
   iou_thres: 0.45
-  use_sam3: false
-  sam3_confidence: 0.45
   save_viz: true
+
+output:
+  # overwrite: replace existing .txt files
+  # append: always add generated detections
+  # append_unique: preserve existing labels and avoid exact duplicate rows
+  label_write_mode: "append_unique"
 
 merge:
   min_mask_area: 20
   iou_match_thresh: 0.15
 
 classes:
-  name_to_id:
-    sam: 0
-    buoy: 1
-    lolo: 2
-    catamaran: 3
-    boat: 4
-    person: 5
+  id_to_name:
+    "0": "sam"
+    "1": "buoy"
+    "2": "hook"
+    "3": "land_pad"
+    "4": "lolo"
+    "5": "catamaran"
+    "6": "boat"
+    "7": "person"
 
-  # YOLO26 is used for these classes
-  yolo26_labels:
+# Model-specific settings.
+yolo26:
+  enabled: true
+  confidence: 0.45
+  labels:
     - boat
 
-  # YOLO11 is used for these classes
-  yolo11_labels:
-    - sam
-    - buoy
+yolo11:
+  enabled: false
+  confidence: 0.45
+  labels:
+    - land_pad
 
-  # SAM3 prompts are used only for these classes
-  sam3_prompts:
+sam3:
+  enabled: true
+  confidence: 0.45
+  prompts:
     - boat

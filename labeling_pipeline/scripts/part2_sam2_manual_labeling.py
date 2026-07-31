@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 import sys
 import yaml
 import cv2
@@ -7,70 +8,150 @@ import numpy as np
 
 from pathlib import Path
 
-
 # =========================================================
-# PATHS
+# PATHS / CONFIG LOADING
 # =========================================================
 SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent
-CONFIG_PATH = PROJECT_ROOT / "config" / "part2_parameters.yaml"
+PIPELINE_ROOT = SCRIPT_DIR.parent
+REPO_ROOT = PIPELINE_ROOT.parent
+PROJECT_ROOT = PIPELINE_ROOT
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "part2_parameters.yaml"
 
+CONFIG_PATH = DEFAULT_CONFIG_PATH
+CFG = {}
+
+IMAGE_DIR = None
+LABEL_DIR = None
+VIS_DIR = None
+
+SAM2_ROOT = None
+SAM2_CHECKPOINT = None
+SAM2_MODEL_CFG = None
+
+DEVICE = "cuda"
+MIN_MASK_AREA = 20
+SAVE_VIZ = True
+
+CLASS_NAMES = {}
+
+WINDOW_NAME = "annotator"
+RESULT_WINDOW = "preview"
 
 # =========================================================
 # CONFIG LOADING
 # =========================================================
+def resolve_config_path(config_path_arg) -> Path:
+    """
+    Resolve config paths in a forgiving way.
+
+    Supports:
+      --config labeling_pipeline/config/<file>.yaml
+      --config config/<file>.yaml
+      --config /absolute/path/to/<file>.yaml
+    """
+    path = Path(config_path_arg).expanduser()
+
+    if path.is_absolute():
+        return path
+
+    candidates = [
+        Path.cwd() / path,
+        REPO_ROOT / path,
+        PROJECT_ROOT / path,
+    ]
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+
+    # Return the root-relative path for a clear FileNotFoundError.
+    return (Path.cwd() / path).resolve()
+
+
+def resolve_project_path(path_value) -> Path:
+    """
+    Resolve paths from the YAML.
+
+    Paths like:
+      dataset_to_label/images
+      models/sam2
+    are interpreted relative to labeling_pipeline/.
+
+    Paths like:
+      labeling_pipeline/dataset_to_label/images
+    are interpreted relative to the repository root.
+    """
+    path = Path(path_value).expanduser()
+
+    if path.is_absolute():
+        return path
+
+    candidates = [
+        Path.cwd() / path,
+        REPO_ROOT / path,
+        PROJECT_ROOT / path,
+    ]
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+
+    if path.parts and path.parts[0] == "labeling_pipeline":
+        return (REPO_ROOT / path).resolve()
+
+    return (PROJECT_ROOT / path).resolve()
+
+
 def load_yaml(path: Path) -> dict:
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
+def load_config(config_path: Path):
+    global CONFIG_PATH, CFG
+    global IMAGE_DIR, LABEL_DIR, VIS_DIR
+    global SAM2_ROOT, SAM2_CHECKPOINT, SAM2_MODEL_CFG
+    global DEVICE, MIN_MASK_AREA, SAVE_VIZ
+    global CLASS_NAMES, WINDOW_NAME, RESULT_WINDOW
 
-CFG = load_yaml(CONFIG_PATH)
+    CONFIG_PATH = resolve_config_path(config_path)
+    CFG = load_yaml(CONFIG_PATH)
 
-IMAGE_DIR = PROJECT_ROOT / CFG["paths"]["image_dir"]
-LABEL_DIR = PROJECT_ROOT / CFG["paths"]["label_dir"]
-VIS_DIR = PROJECT_ROOT / CFG["paths"]["vis_dir"]
+    IMAGE_DIR = resolve_project_path(CFG["paths"]["image_dir"])
+    LABEL_DIR = resolve_project_path(CFG["paths"]["label_dir"])
+    VIS_DIR = resolve_project_path(CFG["paths"].get("vis_dir", "visualizations_final"))
 
-SAM2_ROOT = PROJECT_ROOT / CFG["models"]["sam2_root"]
-SAM2_CHECKPOINT = PROJECT_ROOT / CFG["models"]["sam2_checkpoint"]
-SAM2_MODEL_CFG = CFG["models"]["sam2_model_cfg"]
+    SAM2_ROOT = resolve_project_path(CFG["models"]["sam2_root"])
+    SAM2_CHECKPOINT = resolve_project_path(CFG["models"]["sam2_checkpoint"])
+    SAM2_MODEL_CFG = CFG["models"]["sam2_model_cfg"]
 
-DEVICE = CFG["runtime"]["device"]
+    runtime_cfg = CFG.get("runtime", {})
+    DEVICE = runtime_cfg.get("device", "cuda")
+    MIN_MASK_AREA = int(runtime_cfg.get("min_mask_area", 20))
+    SAVE_VIZ = bool(runtime_cfg.get("save_viz", True))
 
-MIN_MASK_AREA = int(CFG["runtime"]["min_mask_area"])
+    CLASS_NAMES = {
+        int(class_id): str(class_name)
+        for class_id, class_name in CFG["classes"]["id_to_name"].items()
+    }
 
-CLASS_NAMES = {int(k): v for k, v in CFG["classes"]["id_to_name"].items()}
+    ui_cfg = CFG.get("ui", {})
+    WINDOW_NAME = ui_cfg.get("window_name", "annotator")
+    RESULT_WINDOW = ui_cfg.get("result_window", "preview")
 
-WINDOW_NAME = CFG["ui"]["window_name"]
-RESULT_WINDOW = CFG["ui"]["result_window"]
+    # Make SAM2 importable after the config path is known.
+    sys.path.insert(0, str(SAM2_ROOT))
 
-ENABLE_AMG_FALLBACK = bool(CFG["sam2"]["enable_amg_fallback"])
-TRACKBAR_NAME = CFG["sam2"]["trackbar_name"]
-TRACKBAR_MIN_AREA_INIT = int(CFG["sam2"]["trackbar_min_area_init"])
-TRACKBAR_MIN_AREA_MAX = int(CFG["sam2"]["trackbar_min_area_max"])
-
-FALLBACK_MAX_MASKS = int(CFG["sam2"]["fallback_max_masks"])
-FALLBACK_MIN_ASPECT_RATIO = float(CFG["sam2"]["fallback_min_aspect_ratio"])
-FALLBACK_MIN_RECTANGULARITY = float(CFG["sam2"]["fallback_min_rectangularity"])
-FALLBACK_MAX_RECTANGULARITY = float(CFG["sam2"]["fallback_max_rectangularity"])
-
-AMG_POINTS_PER_SIDE = int(CFG["sam2"]["amg_points_per_side"])
-AMG_PRED_IOU_THRESH = float(CFG["sam2"]["amg_pred_iou_thresh"])
-AMG_STABILITY_SCORE_THRESH = float(CFG["sam2"]["amg_stability_score_thresh"])
-AMG_CROP_N_LAYERS = int(CFG["sam2"]["amg_crop_n_layers"])
-AMG_CROP_N_POINTS_DOWNSCALE_FACTOR = int(CFG["sam2"]["amg_crop_n_points_downscale_factor"])
-AMG_BOX_NMS_THRESH = float(CFG["sam2"]["amg_box_nms_thresh"])
-AMG_MIN_MASK_REGION_AREA = int(CFG["sam2"]["amg_min_mask_region_area"])
-
-
-# =========================================================
-# MAKE SAM2 IMPORTABLE
-# =========================================================
-sys.path.insert(0, str(SAM2_ROOT))
-
-from sam2.build_sam import build_sam2  # noqa: E402
-from sam2.sam2_image_predictor import SAM2ImagePredictor  # noqa: E402
-from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator  # noqa: E402
-
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Part 2 manual correction UI using SAM2."
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG_PATH,
+        help="Path to the YAML config file."
+    )
+    return parser.parse_args()
 
 # =========================================================
 # GLOBAL STATE
@@ -90,8 +171,18 @@ current_image_bgr = None
 current_image_rgb = None
 
 sam2_predictor = None
-sam2_mask_generator = None
 
+orientation_line_mode = False
+orientation_line_points = []
+
+# =========================================================
+# KEY CODES
+# =========================================================
+# OpenCV arrow key codes can differ depending on backend/platform.
+KEY_LEFT_CODES = {81, 2424832, 65361}
+KEY_UP_CODES = {82, 2490368, 65362}
+KEY_RIGHT_CODES = {83, 2555904, 65363}
+KEY_DOWN_CODES = {84, 2621440, 65364}
 
 # =========================================================
 # GEOMETRY UTILS
@@ -99,13 +190,11 @@ sam2_mask_generator = None
 def ensure_dir(path: Path):
     path.mkdir(parents=True, exist_ok=True)
 
-
 def list_images_recursive(folder: Path):
     exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
     return sorted(
         [p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in exts]
     )
-
 
 def order_box_points_clockwise(pts: np.ndarray) -> np.ndarray:
     pts = np.array(pts, dtype=np.float32)
@@ -118,7 +207,6 @@ def order_box_points_clockwise(pts: np.ndarray) -> np.ndarray:
     start_idx = np.argmin(s)
     pts = np.roll(pts, -start_idx, axis=0)
     return pts
-
 
 def mask_to_obb(mask: np.ndarray, min_area: float = 20):
     mask = (mask > 0).astype(np.uint8) * 255
@@ -153,10 +241,200 @@ def mask_to_obb(mask: np.ndarray, min_area: float = 20):
         "rectangularity": rectangularity,
     }
 
+def get_obb_angle_deg(obb):
+    """
+    Estimate current OBB orientation from the first edge.
+    """
+    box = obb["box"].astype(np.float32)
+
+    edge = box[1] - box[0]
+    angle_deg = np.rad2deg(np.arctan2(edge[1], edge[0]))
+
+    return float(angle_deg)
 
 def quad_to_rect(box4):
     return cv2.minAreaRect(np.array(box4, dtype=np.float32))
 
+def set_selected_obb_angle_from_two_points(p1, p2):
+    global saved_objects, selected_object_index
+
+    if not saved_objects:
+        print("No object selected")
+        return
+
+    obj = saved_objects[selected_object_index]
+    mask = obj.get("mask", None)
+
+    if mask is None:
+        print("Selected object has no mask; cannot refit OBB from segmentation.")
+        return
+
+    p1 = np.array(p1, dtype=np.float32)
+    p2 = np.array(p2, dtype=np.float32)
+
+    delta = p2 - p1
+    if np.linalg.norm(delta) < 5.0:
+        print("Orientation line too short")
+        return
+
+    angle_deg = float(np.rad2deg(np.arctan2(delta[1], delta[0])))
+
+    new_obb = obb_from_mask_at_angle(
+        mask,
+        angle_deg,
+        min_area=MIN_MASK_AREA,
+        padding_px=3.0
+    )
+
+    if new_obb is None:
+        print("Could not create OBB from selected orientation")
+        return
+
+    obj["obb"] = new_obb
+
+    print(f"Set selected OBB orientation from two points: {angle_deg:.1f} deg")
+
+def obb_from_mask_at_angle(mask: np.ndarray, angle_deg: float, min_area: float = 20, padding_px: float = 2.0):
+    """
+    Build an OBB that fully contains the mask, while forcing the box orientation.
+    This recomputes the box extents from the mask.
+    """
+    mask_u8 = (mask > 0).astype(np.uint8)
+
+    ys, xs = np.where(mask_u8 > 0)
+    if len(xs) < min_area:
+        return None
+
+    pts = np.column_stack([xs, ys]).astype(np.float32)
+
+    theta = np.deg2rad(angle_deg)
+
+    axis_u = np.array([np.cos(theta), np.sin(theta)], dtype=np.float32)
+    axis_v = np.array([-np.sin(theta), np.cos(theta)], dtype=np.float32)
+
+    proj_u = pts @ axis_u
+    proj_v = pts @ axis_v
+
+    u_min = float(proj_u.min()) - padding_px
+    u_max = float(proj_u.max()) + padding_px
+    v_min = float(proj_v.min()) - padding_px
+    v_max = float(proj_v.max()) + padding_px
+
+    corners = np.array([
+        u_min * axis_u + v_min * axis_v,
+        u_max * axis_u + v_min * axis_v,
+        u_max * axis_u + v_max * axis_v,
+        u_min * axis_u + v_max * axis_v,
+    ], dtype=np.float32)
+
+    box = order_box_points_clockwise(corners)
+
+    rect = cv2.minAreaRect(box)
+    (_, _), (w, h), _ = rect
+
+    if w <= 0 or h <= 0:
+        return None
+
+    area = float(np.count_nonzero(mask_u8))
+    long_side = max(w, h)
+    short_side = min(w, h)
+    aspect_ratio = long_side / (short_side + 1e-6)
+    rectangularity = area / (w * h + 1e-6)
+
+    return {
+        "rect": rect,
+        "box": box,
+        "area": area,
+        "aspect_ratio": aspect_ratio,
+        "rectangularity": rectangularity,
+        "angle_deg": float(angle_deg),
+    }
+
+def get_object_rotation_center(obj):
+    """
+    Rotate around the SAM2 segmentation center if a mask exists.
+    If the object was loaded from file and has no mask, rotate around OBB center.
+    """
+    mask = obj.get("mask", None)
+
+    if mask is not None:
+        ys, xs = np.where(mask > 0)
+        if len(xs) > 0:
+            return np.array([xs.mean(), ys.mean()], dtype=np.float32)
+
+    box = obj["obb"]["box"].astype(np.float32)
+    return np.mean(box, axis=0).astype(np.float32)
+
+
+def rotate_obb_around_center(obb, center, angle_deg):
+    box = obb["box"].astype(np.float32)
+
+    theta = np.deg2rad(angle_deg)
+    R = np.array([
+        [np.cos(theta), -np.sin(theta)],
+        [np.sin(theta),  np.cos(theta)],
+    ], dtype=np.float32)
+
+    rotated_box = (box - center) @ R.T + center
+    rotated_box = order_box_points_clockwise(rotated_box)
+
+    rect = quad_to_rect(rotated_box)
+    (_, _), (w, h), _ = rect
+
+    area = cv2.contourArea(rotated_box.astype(np.float32))
+    long_side = max(w, h)
+    short_side = min(w, h)
+
+    obb["box"] = rotated_box
+    obb["rect"] = rect
+    obb["area"] = area
+    obb["aspect_ratio"] = long_side / (short_side + 1e-6)
+    obb["rectangularity"] = None
+
+    return obb
+
+
+def rotate_selected_obb(angle_delta_deg):
+    global saved_objects, selected_object_index
+
+    if not saved_objects:
+        print("No object selected to rotate")
+        return
+
+    selected_object_index = min(selected_object_index, len(saved_objects) - 1)
+    obj = saved_objects[selected_object_index]
+
+    current_angle = obj["obb"].get("angle_deg", None)
+    if current_angle is None:
+        current_angle = get_obb_angle_deg(obj["obb"])
+
+    new_angle = current_angle + angle_delta_deg
+
+    mask = obj.get("mask", None)
+
+    if mask is not None:
+        new_obb = obb_from_mask_at_angle(
+            mask,
+            new_angle,
+            min_area=MIN_MASK_AREA,
+            padding_px=3.0
+        )
+
+        if new_obb is None:
+            print("Could not refit OBB from mask at new angle")
+            return
+
+        obj["obb"] = new_obb
+        print(
+            f"Rotated and refit object {selected_object_index}: "
+            f"{current_angle:.1f} -> {new_angle:.1f} deg"
+        )
+
+    else:
+        print(
+            "Selected object has no mask, so I cannot guarantee full segmentation coverage. "
+            "This usually happens for labels loaded from file or manual OBBs."
+        )
 
 def create_obb_from_4_points(points4):
     pts = np.array(points4, dtype=np.float32)
@@ -204,7 +482,6 @@ def find_object_at_point(x, y, objects):
     hits.sort(key=lambda t: t[0])
     return hits[0][1]
 
-
 # =========================================================
 # FILE IO
 # =========================================================
@@ -214,16 +491,13 @@ def get_relative_paths(img_path: Path):
     vis_path = VIS_DIR / rel_path.with_name(f"{rel_path.stem}_vis.jpg")
     return label_path, vis_path
 
-
 def get_label_path(img_path: Path) -> Path:
     label_path, _ = get_relative_paths(img_path)
     return label_path
 
-
 def get_vis_path(img_path: Path) -> Path:
     _, vis_path = get_relative_paths(img_path)
     return vis_path
-
 
 def save_yolo_obb(txt_path: Path, image_shape, objects):
     ensure_dir(txt_path.parent)
@@ -239,7 +513,6 @@ def save_yolo_obb(txt_path: Path, image_shape, objects):
 
             vals = [str(class_id)] + [f"{v:.6f}" for pt in box for v in pt]
             f.write(" ".join(vals) + "\n")
-
 
 def load_yolo_obb(txt_path: Path, image_shape):
     h, w = image_shape[:2]
@@ -278,7 +551,6 @@ def load_yolo_obb(txt_path: Path, image_shape):
 
     return objects
 
-
 # =========================================================
 # DRAWING
 # =========================================================
@@ -292,18 +564,14 @@ def draw_cross(img, x, y, color):
         thickness=1
     )
 
-
 def object_color(source: str):
     if source == "sam2":
         return (0, 255, 0)
-    if source == "sam2_amg":
-        return (255, 0, 255)
     if source == "manual_obb":
         return (255, 0, 255)
     if source == "file":
         return (200, 200, 200)
     return (200, 200, 200)
-
 
 def draw_ui(image, current_points, current_point_labels, objects, active_class_id,
             img_name, img_idx, total_imgs, selected_idx):
@@ -360,14 +628,42 @@ def draw_ui(image, current_points, current_point_labels, objects, active_class_i
             cv2.LINE_AA
         )
 
+    global orientation_line_mode, orientation_line_points
+    if orientation_line_mode:
+        for i, (px, py) in enumerate(orientation_line_points):
+            cv2.circle(vis, (int(px), int(py)), 5, (0, 255, 255), -1)
+            cv2.putText(
+                vis, str(i + 1),
+                (int(px) + 5, int(py) - 5),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+
+        if len(orientation_line_points) == 2:
+            pts = np.array(orientation_line_points, dtype=np.int32)
+            cv2.line(vis, tuple(pts[0]), tuple(pts[1]), (0, 255, 255), 2)
+
+        cv2.putText(
+            vis,
+            f"ORIENTATION MODE: click 2 points ({len(orientation_line_points)}/2)",
+            (10, 136),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (0, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
     active_name = CLASS_NAMES.get(active_class_id, str(active_class_id))
-    area_val = cv2.getTrackbarPos(TRACKBAR_NAME, WINDOW_NAME)
 
     header1 = f"Image [{img_idx + 1}/{total_imgs}] {img_name}"
     header2 = f"Active class: {active_class_id} ({active_name}) | Selected object: {selected_idx if objects else 'none'}"
-    header3 = "Keys: 0-9 class | Space add SAM2 obj | m manual OBB | x delete selected | c clear clicks"
-    header4 = "s save | a prev | d next | w save+next | u undo last | r rerun AMG fallback | esc cancel manual"
-    header5 = f"Mouse: click OBB=select | Left empty=positive | Right empty=negative | Middle OBB=delete | Fallback area: {area_val}"
+    header3 = "Keys: 0-9 class | Space add SAM2 obj | arrows rotate/refit OBB | o align OBB | m manual OBB | x delete"
+    header4 = "s save | a/d prev/next | w save+next | u undo | c clear clicks | Esc cancel manual | q quit"
+    header5 = "Mouse: click OBB=select | Left empty=positive | Right empty=negative | Middle OBB=delete"
 
     cv2.putText(vis, header1, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 255, 255), 2, cv2.LINE_AA)
     cv2.putText(vis, header2, (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.60, (0, 255, 255), 2, cv2.LINE_AA)
@@ -376,7 +672,6 @@ def draw_ui(image, current_points, current_point_labels, objects, active_class_i
     cv2.putText(vis, header5, (10, 112), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1, cv2.LINE_AA)
 
     return vis
-
 
 def build_result_preview(image, mask, obb, class_id, source="sam2"):
     result = image.copy()
@@ -399,13 +694,27 @@ def build_result_preview(image, mask, obb, class_id, source="sam2"):
 
     return result
 
-
 # =========================================================
 # MOUSE
 # =========================================================
 def mouse_callback(event, x, y, flags, param):
     global points, point_labels, saved_objects, selected_object_index
     global manual_obb_mode, manual_obb_points, current_class_id
+    global orientation_line_mode, orientation_line_points
+
+    if orientation_line_mode:
+        if event == cv2.EVENT_LBUTTONDOWN:
+            orientation_line_points.append([x, y])
+            print(f"Orientation point {len(orientation_line_points)}: ({x}, {y})")
+
+            if len(orientation_line_points) == 2:
+                set_selected_obb_angle_from_two_points(
+                    orientation_line_points[0],
+                    orientation_line_points[1]
+                )
+                orientation_line_points = []
+                orientation_line_mode = False
+        return
 
     if manual_obb_mode:
         if event == cv2.EVENT_LBUTTONDOWN:
@@ -458,85 +767,6 @@ def mouse_callback(event, x, y, flags, param):
                 selected_object_index = 0
             print(f"Deleted object class {removed['class_id']} ({CLASS_NAMES.get(removed['class_id'], removed['class_id'])})")
 
-
-# =========================================================
-# SAM2 AMG FALLBACK
-# =========================================================
-def score_sam_candidate(obb):
-    if obb is None:
-        return None
-
-    area = obb["area"]
-    aspect_ratio = obb["aspect_ratio"]
-    rectangularity = obb["rectangularity"]
-
-    if aspect_ratio is None or rectangularity is None:
-        return None
-
-    if aspect_ratio < FALLBACK_MIN_ASPECT_RATIO:
-        return None
-    if rectangularity < FALLBACK_MIN_RECTANGULARITY or rectangularity > FALLBACK_MAX_RECTANGULARITY:
-        return None
-
-    return (1.0 * area) + (800.0 * aspect_ratio) + (1200.0 * rectangularity)
-
-
-def detect_sam_fallback(image_bgr):
-    if sam2_mask_generator is None:
-        return None
-
-    min_area = max(1, cv2.getTrackbarPos(TRACKBAR_NAME, WINDOW_NAME))
-    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-
-    try:
-        masks = sam2_mask_generator.generate(image_rgb)
-    except Exception as e:
-        print(f"AMG fallback failed: {e}")
-        return None
-
-    if not masks:
-        return None
-
-    masks = sorted(masks, key=lambda x: x.get("area", 0), reverse=True)[:FALLBACK_MAX_MASKS]
-
-    best = None
-    best_score = -1.0
-
-    for m in masks:
-        seg = m["segmentation"].astype(np.uint8)
-        obb = mask_to_obb(seg, min_area=min_area)
-        if obb is None:
-            continue
-
-        score = score_sam_candidate(obb)
-        if score is None:
-            continue
-
-        if score > best_score:
-            best_score = score
-            best = {
-                "class_id": 0,
-                "source": "sam2_amg",
-                "confidence": float(score),
-                "obb": obb,
-                "mask": seg.copy(),
-            }
-
-    return best
-
-
-def get_auto_proposals_for_current_image(image_bgr):
-    proposals = []
-
-    if ENABLE_AMG_FALLBACK:
-        fallback_obj = detect_sam_fallback(image_bgr)
-        if fallback_obj is not None:
-            proposals.append(fallback_obj)
-            print("Added SAM2 AMG fallback proposal")
-
-    return proposals
-
-
 # =========================================================
 # IMAGE LOADING
 # =========================================================
@@ -544,6 +774,7 @@ def load_image_at_index(idx):
     global current_image_index, current_image_bgr, current_image_rgb
     global saved_objects, points, point_labels, selected_object_index
     global manual_obb_mode, manual_obb_points
+    global orientation_line_mode, orientation_line_points
 
     current_image_index = idx
     img_path = image_paths[current_image_index]
@@ -567,73 +798,59 @@ def load_image_at_index(idx):
     selected_object_index = 0
     manual_obb_mode = False
     manual_obb_points = []
+    orientation_line_mode = False
+    orientation_line_points = []
 
     label_path = get_label_path(img_path)
     if label_path.exists():
         saved_objects = load_yolo_obb(label_path, current_image_bgr.shape)
         print(f"\nLoaded existing labels from file: {label_path}")
     else:
-        saved_objects = get_auto_proposals_for_current_image(current_image_bgr)
-        print(f"\nAuto-loaded proposals: {len(saved_objects)}")
-
-    if saved_objects and any(obj["source"] == "sam2_amg" for obj in saved_objects):
-        fb = next(obj for obj in saved_objects if obj["source"] == "sam2_amg")
-        preview = build_result_preview(current_image_bgr, fb["mask"], fb["obb"], fb["class_id"], source="sam2_amg")
-        cv2.imshow(RESULT_WINDOW, preview)
+        saved_objects = []
+        print("\nNo existing labels found. Starting empty.")
 
     rel_img = img_path.relative_to(IMAGE_DIR)
     print(f"Loaded image {current_image_index + 1}/{len(image_paths)}: {rel_img}")
 
-
-def rerun_auto_proposals():
-    global saved_objects, selected_object_index, points, point_labels
-    global manual_obb_mode, manual_obb_points
-
-    points = []
-    point_labels = []
-    manual_obb_mode = False
-    manual_obb_points = []
-    saved_objects = get_auto_proposals_for_current_image(current_image_bgr)
-    selected_object_index = 0
-
-    print(f"Recomputed proposals: {len(saved_objects)}")
-
-    if saved_objects and any(obj["source"] == "sam2_amg" for obj in saved_objects):
-        fb = next(obj for obj in saved_objects if obj["source"] == "sam2_amg")
-        preview = build_result_preview(current_image_bgr, fb["mask"], fb["obb"], fb["class_id"], source="sam2_amg")
-        cv2.imshow(RESULT_WINDOW, preview)
-
-
 def save_current_image():
     img_path = image_paths[current_image_index]
     txt_path = get_label_path(img_path)
-    vis_path = get_vis_path(img_path)
 
     save_yolo_obb(txt_path, current_image_bgr.shape, saved_objects)
 
-    vis = draw_ui(
-        current_image_bgr, [], [], saved_objects, current_class_id,
-        str(img_path.relative_to(IMAGE_DIR)), current_image_index, len(image_paths), selected_object_index
-    )
-    ensure_dir(vis_path.parent)
-    cv2.imwrite(str(vis_path), vis)
-
     print(f"Saved labels: {txt_path}")
-    print(f"Saved visualization: {vis_path}")
-    print(f"Objects saved: {len(saved_objects)}")
 
+    if SAVE_VIZ:
+        vis_path = get_vis_path(img_path)
+        vis = draw_ui(
+            current_image_bgr, [], [], saved_objects, current_class_id,
+            str(img_path.relative_to(IMAGE_DIR)), current_image_index, len(image_paths), selected_object_index
+        )
+        ensure_dir(vis_path.parent)
+        cv2.imwrite(str(vis_path), vis)
+        print(f"Saved visualization: {vis_path}")
+
+    print(f"Objects saved: {len(saved_objects)}")
 
 # =========================================================
 # MAIN
 # =========================================================
 def main():
-    global sam2_predictor, sam2_mask_generator
+    global sam2_predictor
     global current_class_id, selected_object_index, saved_objects
     global points, point_labels, image_paths
     global manual_obb_mode, manual_obb_points
+    global orientation_line_mode, orientation_line_points
+
+    args = parse_args()
+    load_config(args.config)
+
+    from sam2.build_sam import build_sam2  # noqa: E402
+    from sam2.sam2_image_predictor import SAM2ImagePredictor  # noqa: E402
 
     LABEL_DIR.mkdir(parents=True, exist_ok=True)
-    VIS_DIR.mkdir(parents=True, exist_ok=True)
+    if SAVE_VIZ:
+        VIS_DIR.mkdir(parents=True, exist_ok=True)
 
     image_paths = list_images_recursive(IMAGE_DIR)
     if not image_paths:
@@ -643,7 +860,9 @@ def main():
     print("[INFO] Configuration loaded from:", CONFIG_PATH)
     print("[INFO] Image directory:", IMAGE_DIR)
     print("[INFO] Label directory:", LABEL_DIR)
-    print("[INFO] Visualization directory:", VIS_DIR)
+    print("[INFO] Save visualizations:", SAVE_VIZ)
+    if SAVE_VIZ:
+        print("[INFO] Visualization directory:", VIS_DIR)
     print("[INFO] Number of images found:", len(image_paths))
     print("[INFO] SAM2 root:", SAM2_ROOT)
     print("[INFO] SAM2 cfg:", SAM2_MODEL_CFG)
@@ -652,18 +871,6 @@ def main():
     print("Loading SAM2...")
     sam2_model = build_sam2(SAM2_MODEL_CFG, str(SAM2_CHECKPOINT), device=DEVICE)
     sam2_predictor = SAM2ImagePredictor(sam2_model)
-
-    if ENABLE_AMG_FALLBACK:
-        sam2_mask_generator = SAM2AutomaticMaskGenerator(
-            model=sam2_model,
-            points_per_side=AMG_POINTS_PER_SIDE,
-            pred_iou_thresh=AMG_PRED_IOU_THRESH,
-            stability_score_thresh=AMG_STABILITY_SCORE_THRESH,
-            crop_n_layers=AMG_CROP_N_LAYERS,
-            crop_n_points_downscale_factor=AMG_CROP_N_POINTS_DOWNSCALE_FACTOR,
-            box_nms_thresh=AMG_BOX_NMS_THRESH,
-            min_mask_region_area=AMG_MIN_MASK_REGION_AREA,
-        )
 
     print("\nClasses:")
     for k, v in CLASS_NAMES.items():
@@ -676,20 +883,21 @@ def main():
     print("  0..9        = select class")
     print("  Space       = run SAM2 and add object")
     print("  m           = manual OBB mode (click 4 corners)")
+    print("  o           = orientation mode: click 2 points to align selected OBB")
     print("  Backspace   = remove last manual OBB point")
     print("  Esc         = cancel manual OBB mode")
     print("  x           = delete selected object")
+    print("  Left/Right  = rotate selected OBB -/+ 1 degree")
+    print("  Down/Up     = rotate selected OBB -/+ 5 degrees")
     print("  c           = clear current SAM2 clicks")
     print("  u           = undo last object")
     print("  s           = save current image")
     print("  a / d       = previous / next image")
     print("  w           = save and next")
-    print("  r           = rerun AMG fallback for current image")
     print("  q           = quit")
 
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
     cv2.namedWindow(RESULT_WINDOW, cv2.WINDOW_NORMAL)
-    cv2.createTrackbar(TRACKBAR_NAME, WINDOW_NAME, TRACKBAR_MIN_AREA_INIT, TRACKBAR_MIN_AREA_MAX, lambda x: None)
     cv2.setMouseCallback(WINDOW_NAME, mouse_callback)
 
     load_image_at_index(0)
@@ -709,7 +917,11 @@ def main():
         )
         cv2.imshow(WINDOW_NAME, vis)
 
-        key = cv2.waitKey(20) & 0xFF
+        key_raw = cv2.waitKeyEx(10)
+        if key_raw < 0:
+            continue
+
+        key = key_raw & 0xFF
 
         if key in [ord(str(i)) for i in range(10)]:
             selected = int(chr(key))
@@ -724,6 +936,26 @@ def main():
                 print(f"Deleted object class {removed['class_id']} ({CLASS_NAMES.get(removed['class_id'], removed['class_id'])})")
             else:
                 print("No objects to delete")
+
+        elif key_raw in KEY_LEFT_CODES:
+            rotate_selected_obb(-1.0)
+
+        elif key_raw in KEY_RIGHT_CODES:
+            rotate_selected_obb(1.0)
+
+        elif key_raw in KEY_DOWN_CODES:
+            rotate_selected_obb(-5.0)
+
+        elif key_raw in KEY_UP_CODES:
+            rotate_selected_obb(5.0)
+
+        elif key == ord("o"):
+            orientation_line_mode = True
+            orientation_line_points = []
+            points = []
+            point_labels = []
+            manual_obb_mode = False
+            print("Orientation line mode: click 2 points along desired OBB direction")
 
         elif key == ord(" "):
             if manual_obb_mode:
@@ -751,6 +983,8 @@ def main():
                 print("No valid OBB found from SAM2 mask")
                 continue
 
+            obb["angle_deg"] = get_obb_angle_deg(obb)
+
             saved_objects.append({
                 "class_id": current_class_id,
                 "source": "sam2",
@@ -774,7 +1008,7 @@ def main():
             point_labels = []
             print(f"Manual OBB mode enabled for class {current_class_id} ({CLASS_NAMES[current_class_id]})")
 
-        elif key == 8:
+        elif key in {8, 127} or key_raw in {8, 127, 65288}:
             if manual_obb_mode and manual_obb_points:
                 manual_obb_points.pop()
                 print("Removed last manual OBB point")
@@ -816,15 +1050,11 @@ def main():
             next_idx = min(len(image_paths) - 1, current_image_index + 1)
             load_image_at_index(next_idx)
 
-        elif key == ord("r"):
-            rerun_auto_proposals()
-
         elif key == ord("q"):
             print("Exiting...")
             break
 
     cv2.destroyAllWindows()
-
 
 if __name__ == "__main__":
     main()

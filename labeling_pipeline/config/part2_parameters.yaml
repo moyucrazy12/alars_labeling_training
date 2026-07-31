@@ -1,7 +1,7 @@
 paths:
-  image_dir: "dataset_to_label/images"
-  label_dir: "dataset_to_label/labels"
-  vis_dir: "dataset_to_label/visualizations_final"
+  image_dir: "dataset_to_label_2/images"
+  label_dir: "dataset_to_label_2/labels"
+  vis_dir: "dataset_to_label_2/visualizations_final"
 
 models:
   sam2_root: "models/sam2"
@@ -11,35 +11,19 @@ models:
 runtime:
   device: "cuda"
   min_mask_area: 20
+  save_viz: false
 
 classes:
   id_to_name:
     "0": "sam"
     "1": "buoy"
-    "2": "lolo"
-    "3": "white"
-    "4": "boat"
-    "5": "people"
+    "2": "hook"
+    "3": "land_pad"
+    "4": "lolo"
+    "5": "catamaran"
+    "6": "boat"
+    "7": "person"
 
 ui:
   window_name: "annotator"
   result_window: "preview"
-
-sam2:
-  enable_amg_fallback: true
-  trackbar_name: "sam_min_area"
-  trackbar_min_area_init: 1500
-  trackbar_min_area_max: 50000
-
-  fallback_max_masks: 120
-  fallback_min_aspect_ratio: 2.0
-  fallback_min_rectangularity: 0.45
-  fallback_max_rectangularity: 1.05
-
-  amg_points_per_side: 32
-  amg_pred_iou_thresh: 0.8
-  amg_stability_score_thresh: 0.92
-  amg_crop_n_layers: 1
-  amg_crop_n_points_downscale_factor: 2
-  amg_box_nms_thresh: 0.7
-  amg_min_mask_region_area: 300
