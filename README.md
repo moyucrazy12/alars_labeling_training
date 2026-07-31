@@ -1,356 +1,154 @@
 # ALARS Labeling and Training
 
 ## Overview
-This repository contains the **labeling and training pipeline** used for the ALARS perception system.
 
-In addition to training, this repository is structured as a **ROS 2 resource package**. Its role within the ROS 2 workflow is to provide access to trained YOLO models in a standardized way, allowing other packages (e.g., [alars_auv_perception](https://github.com/smarc-project/smarc2/tree/humble/perception/alars/auv_alars_perception)) to load them directly using `FindPackageShare`.
+This repository provides the complete pipeline for  dataset preparation, dataset labeling, YOLO OBB training, testing, and trained-model export for the ALARS perception system.
 
-It is designed for three main purposes:
+In addition, the repository is structured as a ROS 2 resource package, which means other ROS 2 packages can find and load the trained YOLO models from the package share path, instead of relying on manually defined model paths.
 
-1. **Dataset labeling**, combining automatic and manual annotation tools.
-2. **YOLO model training**, using the labeled datasets for object detection with oriented bounding boxes (OBB).
-3. **Model documentation**, including the trained models obtained through the pipeline, together with their evaluation results and the datasets used for training.
+The pipeline is fully Docker-based, which separates the environments required by [SAM 3](https://github.com/facebookresearch/sam3), [SAM 2](https://github.com/facebookresearch/sam2), ROS 2 rosbag tools, and YOLO training, thereby reducing dependency conflicts and making the workflow easier to reproduce across machines.
 
-The labeling pipeline is divided into two stages:
+## Main components
 
-- **Part 1:** Automatic labeling using **SAM 3** and YOLO-based segmentation/detection.
-- **Part 2:** Manual correction and refinement using **SAM 2** through an interactive UI.
+The repository is organized into four main parts:
 
-This separation is useful because the two segmentation models require different environments and dependencies.
+- `docker/`: Dockerfiles for the different pipeline environments.
+- `labeling_pipeline/`: frame selection, automatic labeling, and manual correction tools.
+- `training_pipeline/`: dataset merge/split, YOLO training, testing, and model export tools.
+- `trained_models/`: exported YOLO models used by the ALARS perception system.
 
----
+## Docker requirements
 
-## Setup
+Install:
 
-This package is a **ROS 2 resource package** designed to provide access to trained YOLO models (e.g., via `FindPackageShare`) without requiring manual file management.
+1. Docker Engine
+2. Docker Compose
+3. NVIDIA GPU driver
+4. NVIDIA Container Toolkit
 
-### ROS 2 Usage (Models Only)
+Use the official installation guides:
 
-If this repository is added as a **submodule**, make sure to build it so the models become discoverable by other packages:
+- [Docker Engine installation for Ubuntu](https://docs.docker.com/engine/install/ubuntu/)
+- [NVIDIA Container Toolkit installation guide](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+
+After installation, verify that Docker can access the GPU:
+
+```bash
+docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+```
+
+## Environment variables
+
+The `.env` file defines the user created inside the containers:
+
+```env
+USER_UID=1000
+USER_GID=999
+USER_NAME=smarc
+```
+
+These values are used by Docker Compose as build arguments. They help avoid permission problems when the container creates files inside the mounted repository.
+
+## Build containers
+
+From the repository root:
+
+```bash
+docker compose build
+```
+
+Or build a specific service:
+
+```bash
+docker compose build part1
+docker compose build part2
+docker compose build training-stage1
+```
+
+## Main workflow
+
+A typical full workflow is:
+
+```bash
+# 1. Optional: extract/select frames from ROS 2 rosbags
+docker compose run --rm frame_selection_rosbag
+
+# 2. Optional: further filter the extracted frames from an image folder
+# This can be useful if you want to use a stronger DINOv2 model or apply extra filtering.
+docker compose run --rm frame_selection_folder
+
+# 3. Automatic labeling
+docker compose run --rm part1
+
+# 4. Manual correction
+docker compose run --rm part2
+
+# 5. Merge old and new datasets into a stable train/val/test dataset
+docker compose run --rm merge_split_dataset
+
+# 6. Train from a previous model
+docker compose run --rm train_combined_finetune
+
+# 7. Or train from official YOLO11 OBB pretrained weights
+docker compose run --rm train_combined_pretrained
+
+# 8. Test any trained model
+docker compose run --rm test_model
+
+# 9. Export the selected best model to trained_models/
+docker compose run --rm export_best_model
+```
+
+`frame_selection_folder` can be used either directly on an existing image folder or after `frame_selection_rosbag` if the extracted frames still need additional filtering.
+
+## Docker services
+
+| Service | Purpose |
+|---|---|
+| `frame_selection_rosbag` | Extract/select representative images from ROS 2 rosbags. |
+| `frame_selection_folder` | Select representative frames from an existing image folder using [DINOv2](https://github.com/facebookresearch/dinov2) + [HDBSCAN](https://joss.theoj.org/papers/10.21105/joss.00205). It can also be used after rosbag frame extraction for additional filtering. |
+| `part1` | Automatic labeling using [SAM 3](https://github.com/facebookresearch/sam3) and [YOLO](https://docs.ultralytics.com/models/yolo11/). |
+| `part2` | Manual correction using the [SAM 2](https://github.com/facebookresearch/sam2) interactive UI. |
+| `merge_split_dataset` | Merge old/new datasets using a stable folder-level split registry. |
+| `train_combined_finetune` | Fine-tune from an existing trained model. |
+| `train_combined_pretrained` | Train from official [YOLO11 OBB](https://docs.ultralytics.com/tasks/obb/) pretrained weights. |
+| `test_model` | Evaluate and optionally visualize predictions for a trained model. |
+| `export_best_model` | Copy the best model from `runs/` into `trained_models/` with a clean name. |
+
+## ROS 2 usage: models only
+
+This repository can also be used as a ROS 2 resource package to expose trained models to other ROS 2 packages.
+
+If the repository is used as a submodule inside a ROS 2 workspace:
 
 ```bash
 colcon build --symlink-install --packages-select alars_labeling_training
 source install/setup.bash
 ```
 
----
+Other ROS 2 packages can then locate the package share path and load models from `trained_models/`.
 
-## Installation
+## Important folders
 
-Since this pipeline uses both **SAM 3** and **SAM 2**, it is recommended to install them in **separate Conda environments** to avoid dependency conflicts.
-
----
-
-## Install SAM 3 Environment
-The first model to install is **SAM 3**, based on the original repository: [facebookresearch/sam3](https://github.com/facebookresearch/sam3.git)
-
-From the repository root:
-
-```bash
-cd labeling_pipeline
-cd models
-```
-
-### 1. Create a new Conda environment
-```bash
-conda create -n part1_labeling_sam3 python=3.12
-conda deactivate
-conda activate part1_labeling_sam3
-```
-
-### 2. Install PyTorch with CUDA support
-```bash
-pip install torch==2.10.0 torchvision --index-url https://download.pytorch.org/whl/cu128
-```
-
-### 3. Clone the repository and install the package
-```bash
-git clone https://github.com/facebookresearch/sam3.git
-cd sam3
-pip install -e .
-pip install ultralytics
-```
-
-> **Important**  
-> Before using SAM 3, you must request access to the checkpoints from the SAM 3 Hugging Face repository:  
-> [facebook/sam3](https://huggingface.co/facebook/sam3)
->
-> Once access is granted, authenticate with Hugging Face so the checkpoints can be downloaded. For example:
->
-> ```bash
-> hf auth login
-> ```
-
----
-
-## Install SAM 2 Environment
-The second model to install is **SAM 2**, based on the original repository: [facebookresearch/sam2](https://github.com/facebookresearch/sam2.git)
-
-The code requires:
-- `python >= 3.10`
-- `torch >= 2.5.1`
-- `torchvision >= 0.20.1`
-
-From the repository root:
-
-```bash
-cd labeling_pipeline
-cd models
-```
-
-### 1. Create a new Conda environment
-```bash
-conda create -n part2_labeling_sam2 python=3.10
-conda deactivate
-conda activate part2_labeling_sam2
-```
-
-### 2. Clone the repository and install the package
-```bash
-git clone https://github.com/facebookresearch/sam2.git
-cd sam2
-pip install -e .
-```
-> [!NOTE]
-> After installing the requirements in the conda environment, you may encounter a dependency issue related to Ultralytics. However, this part of the pipeline does not require it, so you can safely continue with the next steps.
-
-### 3. Download the checkpoints
-All checkpoints can be downloaded with:
-
-```bash
-cd checkpoints && ./download_ckpts.sh && cd ..
-```
-
-Or downloaded individually:
-
-- [sam2.1_hiera_tiny.pt](https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_tiny.pt)
-- [sam2.1_hiera_small.pt](https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_small.pt)
-- [sam2.1_hiera_base_plus.pt](https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_base_plus.pt)
-- [sam2.1_hiera_large.pt](https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt)
-
-These checkpoints correspond to **SAM 2.1**, the improved version of SAM 2.
-
-After installation, you can deactivate the environment if needed:
-
-```bash
-conda deactivate
-```
-
----
-
-## Labeling Pipeline
-
-## Part 1: Automatic Labeling with SAM 3 + YOLO
-The first stage of the labeling pipeline performs **automatic labeling** using:
-
-- **SAM 3** for prompt-based segmentation
-- **YOLO segmentation models** for general or newly introduced classes
-- A **custom YOLO OBB model** trained to identify:
-  - sam
-  - buoy
-  - lolo
-  - catamaran
-
-This stage generates labels automatically and saves the corresponding **oriented bounding boxes (OBB)** for each image in the dataset.
-
-### Before running Part 1
-Make sure that:
-
-- The required models are stored in the correct folders, especially:
-  - `models/yolo_models/`
-- Your custom YOLO models are available there.
-- The images to label are located in:
-  - `dataset_to_label/images/`
-- The desired classes and confidence thresholds are configured in:
-  - `part1_parameters.yaml`
-
-### Run Part 1
-```bash
-conda deactivate
-conda activate part1_labeling_sam3
-cd labeling_pipeline
-python3 scripts/part1_sam3_yolo.py
-```
-
----
-
-## Part 2: Manual Labeling and Correction with SAM 2
-The second stage is intended for **manual correction** when the automatically generated labels are not accurate enough.
-
-This tool provides an interactive UI where the user can:
-
-- click on an object to segment it with SAM 2
-- generate an OBB from the selected region
-- manually define an OBB using four corner points if segmentation is not accurate
-- remove, redo, or adjust existing annotations
-
-This makes manual labeling much faster than drawing all boxes from scratch.
-
-### Before running Part 1
-Make sure that:
-
-- The required model is stored in the correct folder, especially:
-  - `models/sam2`
-- Your custom YOLO models are available there.
-- The images and labels to check are located in:
-  - `dataset_to_label/images/`
-  - `dataset_to_label/labels/`
-- The desired classes and confidence thresholds are configured in:
-  - `part2_parameters.yaml`
-
-### Run Part 2
-```bash
-conda deactivate
-conda activate part2_labeling_sam2
-cd labeling_pipeline
-python3 scripts/part2_sam2_manual_labeling.py
-```
-
----
-
-## Manual Labeling UI Controls
-
-| Control | Action |
+| Folder | Description |
 |---|---|
-| Left click | Select object if clicking on an existing OBB; otherwise add a positive SAM 2 point |
-| Right click | Select object if clicking on an existing OBB; otherwise add a negative SAM 2 point |
-| Middle click | Delete object if clicking on an existing OBB |
-| `0..5` | Select class |
-| `Space` | Run SAM 2 and add object |
-| `m` | Enter manual OBB mode (click 4 corners) |
-| `Backspace` | Remove last manual OBB point |
-| `Esc` | Cancel manual OBB mode |
-| `x` | Delete selected object |
-| `c` | Clear current SAM 2 clicks |
-| `u` | Undo last object |
-| `s` | Save current image |
-| `a / d` | Previous / next image |
-| `w` | Save and move to next image |
-| `r` | Rerun AMG fallback for current image |
-| `q` | Quit |
-
----
-
-## YOLO Models
-Inside the `trained_models/` folder you can find the currently available YOLO models trained from `yolo11n-obb.pt`.
-
-That folder should also include a more detailed description of:
-
-- the datasets used for training
-- the classes included in each model
-- the corresponding evaluation results on a separate test set
-
-A general summary is provided below.
-
-### Available Models
-
-| Model | Classes | Training Data | Description |
-|---|---|---|---|
-| `yolo_model_2cls_fisheye` | Sam, buoy | Real images with fisheye distortion | Model specialized for real fisheye data, focused only on sam and buoy detection. |
-| `yolo_model_2cls_mixed` | Sam, buoy | Real and simulated images, with and without fisheye distortion | More general 2-class model for sam and buoy detection across mixed domains. |
-| `yolo_model_5cls` | Sam, buoy, lolo, catamaran, boats | Real and simulated images, with and without fisheye distortion | Multi-class model for the main marine objects used in the perception pipeline. |
-| `yolo_model_6cls` | Sam, buoy, lolo, catamaran, boats, people | Real and simulated images, with and without fisheye distortion | Extended model including people in addition to the marine object classes. |
-
----
-
-## Training Process
-
-For training, the dataset must follow the structure expected by:
-
-```bash
-training_pipeline/data.yaml
-```
-
-At minimum, you should have two main folders:
-
-- `images/`
-- `labels/`
-
-Each of them should contain the standard split:
-
-- `train/`
-- `val/`
-- `test/`
-
-A typical structure is:
-
-```bash
-dataset/
-├── images/
-│   ├── train/
-│   ├── val/
-│   └── test/
-└── labels/
-    ├── train/
-    ├── val/
-    └── test/
-```
-
-### Training Strategy
-The training process is divided into **two stages**:
-
-1. **Stage 1:**  
-   Train for more epochs at a lower image resolution.  
-   This helps the model learn the general structure of the task efficiently.
-
-2. **Stage 2:**  
-   Fine-tune for fewer epochs at a higher image resolution.  
-   This helps improve performance, especially for **small-object detections**.
-
-This two-stage strategy was chosen to balance training cost and final detection quality.
-
-### Training Environment
-The training environment is the same as the one described in the perception package:  
-[alars_auv_perception](https://github.com/smarc-project/smarc2/tree/humble/perception/alars/auv_alars_perception)
-
-### Run Training
-Start with Stage 1:
-
-```bash
-python3 training_pipeline/train_stage1.py
-```
-
-After Stage 1 finishes, continue with Stage 2:
-
-```bash
-python3 training_pipeline/train_stage2.py
-```
----
-
-## Testing Process
-
-To evaluate a trained model, this repository provides a configurable evaluation script based on the dataset's `test` split.
-
-The evaluation process is fully configurable through a YAML file, where you can define:
-
-- model path  
-- dataset (`data.yaml`)  
-- classes and class names  
-- inference parameters (e.g., `imgsz`, `conf`, `iou`)  
-- output directory and debug options  
-
-Before running the evaluation, make sure to adjust the configuration file:
-
-```bash
-test_parameters.yaml
-```
-
-Then run:
-
-```bash
-python3 test_stage.py --config test_parameters.yaml
-```
-
----
+| `data/rosbags/` | Input folder for ROS 2 rosbags used by the frame-selection pipeline. |
+| `data/old_dataset/` | Previous dataset, already divided into `train`, `val`, and `test` if available. This is used by the merge/split step and the split registry. |
+| `labeling_pipeline/dataset_to_label/` | Current dataset being labeled. |
+| `training_pipeline/dataset_combined/` | Generated combined train/val/test dataset. It can be recreated. |
+| `training_pipeline/config/split_registry.csv` | Stable folder-level train/val/test registry. |
+| `runs_yolo_training/` | Raw training outputs from Ultralytics. |
+| `trained_models/` | Clean exported model files for reuse. |
 
 ## Notes
-- Keep the SAM 3 and SAM 2 environments separate to avoid dependency conflicts.
-- Verify all model paths before running the labeling scripts.
-- Verify the dataset structure before starting training.
-- Keep `part1_parameters.yaml` updated with the correct classes and thresholds for automatic labeling.
 
----
+- Do not manually edit `training_pipeline/dataset_combined/`; it is generated.
+- Keep raw datasets and labeled datasets as source data.
+- Keep `data/old_dataset/` if you want to preserve and reuse an existing train/val/test split.
+- Keep the split registry to preserve stable train/val/test assignments when adding new datasets.
+- Export final models into `trained_models/` instead of manually copying from `runs/`.
 
 ## Maintainer
-**Cristhian Mallqui Castro**  
+
+Cristhian Mallqui Castro  
 ckmc@kth.se
