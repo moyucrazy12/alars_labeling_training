@@ -1,0 +1,184 @@
+name: alars-labeling-training
+
+x-common: &common
+  volumes:
+    - .:/workspace/alars_labeling_training
+    - ./runs:/workspace/runs
+    - ${HOME}/.cache/huggingface:/home/${USER_NAME}/.cache/huggingface
+    - ${HOME}/.cache/torch:/home/${USER_NAME}/.cache/torch
+    - ${HOME}/.config/Ultralytics:/home/${USER_NAME}/.config/Ultralytics
+  ipc: host
+  shm_size: "16gb"
+  gpus: all
+
+services:
+
+  frame_selection_folder:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frame_selection
+      args:
+        USER_UID: ${USER_UID}
+        USER_GID: ${USER_GID}
+        USER_NAME: ${USER_NAME}
+    working_dir: /workspace/alars_labeling_training
+    volumes:
+      - .:/workspace/alars_labeling_training
+      - ./data:/workspace/data
+      - ${HOME}/.cache/torch:/home/${USER_NAME}/.cache/torch
+    ipc: host
+    shm_size: "16gb"
+    gpus: all
+    environment:
+      HOME: /home/${USER_NAME}
+    command: >
+      bash -lc "source /opt/ros/humble/setup.bash &&
+      python3 labeling_pipeline/scripts/frame_selection_folder.py
+      --config labeling_pipeline/config/frame_selection_folder.yaml"
+
+  frame_selection_rosbag:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frame_selection
+      args:
+        USER_UID: ${USER_UID}
+        USER_GID: ${USER_GID}
+        USER_NAME: ${USER_NAME}
+    working_dir: /workspace/alars_labeling_training
+    volumes:
+      - .:/workspace/alars_labeling_training
+      - ./data:/workspace/data
+      - ${HOME}/.cache/torch:/home/${USER_NAME}/.cache/torch
+    ipc: host
+    shm_size: "16gb"
+    gpus: all
+    environment:
+      HOME: /home/${USER_NAME}
+    command: >
+      bash -lc "source /opt/ros/humble/setup.bash &&
+      python3 labeling_pipeline/scripts/frame_selection_rosbag.py
+      --config labeling_pipeline/config/frame_selection_rosbag.yaml"
+
+  part1_auto_labeling:
+    <<: *common
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.part1_sam3
+      args:
+        USER_UID: ${USER_UID}
+        USER_GID: ${USER_GID}
+        USER_NAME: ${USER_NAME}
+    working_dir: /workspace/alars_labeling_training
+    environment:
+      HOME: /home/${USER_NAME}
+      HF_HOME: /home/${USER_NAME}/.cache/huggingface
+      HUGGINGFACE_HUB_TOKEN: ${HUGGINGFACE_HUB_TOKEN:-}
+    command: >
+      python3.12 labeling_pipeline/scripts/part1_sam3_yolo_auto_labeling.py
+      --config labeling_pipeline/config/part1_parameters.yaml
+
+  part2_manual_labeling:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.part2_sam2
+      args:
+        USER_UID: ${USER_UID}
+        USER_GID: ${USER_GID}
+        USER_NAME: ${USER_NAME}
+    working_dir: /workspace/alars_labeling_training
+    volumes:
+      - .:/workspace/alars_labeling_training
+      - ./runs:/workspace/runs
+      - ${HOME}/.cache/torch:/home/${USER_NAME}/.cache/torch
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    ipc: host
+    shm_size: "16gb"
+    gpus: all
+    environment:
+      HOME: /home/${USER_NAME}
+      DISPLAY: ${DISPLAY:-:0}
+      QT_X11_NO_MITSHM: "1"
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,graphics
+    command: >
+      python3 labeling_pipeline/scripts/part2_sam2_manual_labeling.py
+      --config labeling_pipeline/config/part2_parameters.yaml
+
+  merge_split_dataset:
+    <<: *common
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.training_yolo
+      args:
+        USER_UID: ${USER_UID}
+        USER_GID: ${USER_GID}
+        USER_NAME: ${USER_NAME}
+    working_dir: /workspace/alars_labeling_training
+    environment:
+      HOME: /home/${USER_NAME}
+    command: >
+      python3 training_pipeline/scripts/merge_split_dataset.py
+      --config training_pipeline/config/merge_split_dataset.yaml
+
+  train_combined_finetune:
+    <<: *common
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.training_yolo
+      args:
+        USER_UID: ${USER_UID}
+        USER_GID: ${USER_GID}
+        USER_NAME: ${USER_NAME}
+    working_dir: /workspace/alars_labeling_training
+    environment:
+      HOME: /home/${USER_NAME}
+    command: >
+      python3 training_pipeline/scripts/train_combined_finetune.py
+      --config training_pipeline/config/train_combined_params.yaml
+
+  train_combined_pretrained:
+    <<: *common
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.training_yolo
+      args:
+        USER_UID: ${USER_UID}
+        USER_GID: ${USER_GID}
+        USER_NAME: ${USER_NAME}
+    working_dir: /workspace/alars_labeling_training
+    environment:
+      HOME: /home/${USER_NAME}
+    command: >
+      python3 training_pipeline/scripts/train_combined_pretrained.py
+      --config training_pipeline/config/train_combined_params.yaml
+
+  test_model:
+    <<: *common
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.training_yolo
+      args:
+        USER_UID: ${USER_UID}
+        USER_GID: ${USER_GID}
+        USER_NAME: ${USER_NAME}
+    working_dir: /workspace/alars_labeling_training
+    environment:
+      HOME: /home/${USER_NAME}
+    command: >
+      python3 training_pipeline/scripts/test_model.py
+      --config training_pipeline/config/test_model_params.yaml
+
+  export_best_model:
+    <<: *common
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.training_yolo
+      args:
+        USER_UID: ${USER_UID}
+        USER_GID: ${USER_GID}
+        USER_NAME: ${USER_NAME}
+    working_dir: /workspace/alars_labeling_training
+    environment:
+      HOME: /home/${USER_NAME}
+    command: >
+      python3 training_pipeline/scripts/export_best_model.py
+      --config training_pipeline/config/export_model_params.yaml

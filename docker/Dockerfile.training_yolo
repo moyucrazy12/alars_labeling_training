@@ -1,0 +1,83 @@
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+
+ARG USER_UID=1000
+ARG USER_GID=1000
+ARG USER_NAME=smarc
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PIP_NO_CACHE_DIR=1
+
+# Basic system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-dev \
+    git \
+    wget \
+    curl \
+    ca-certificates \
+    build-essential \
+    libglib2.0-0 \
+    libgl1 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Make python/pip commands predictable
+RUN ln -sf /usr/bin/python3 /usr/bin/python && \
+    python3 -m pip install --upgrade pip setuptools wheel
+
+# Create user/group matching host
+RUN if ! getent group ${USER_GID} >/dev/null; then \
+        groupadd -g ${USER_GID} ${USER_NAME}; \
+    fi && \
+    if ! id -u ${USER_UID} >/dev/null 2>&1; then \
+        useradd -m -u ${USER_UID} -g ${USER_GID} -s /bin/bash ${USER_NAME}; \
+    fi
+
+# Install PyTorch 2.6.0 CUDA 12.4 wheels
+RUN python3 -m pip install \
+    torch==2.6.0 \
+    torchvision==0.21.0 \
+    torchaudio==2.6.0 \
+    --index-url https://download.pytorch.org/whl/cu124
+
+# Install pinned ML / vision stack.
+# Important: keep numpy pinned after ultralytics-related installs.
+RUN python3 -m pip install \
+    numpy==1.23.5 \
+    opencv-python==4.11.0.86 \
+    ultralytics==8.3.227 \
+    pyyaml \
+    pandas \
+    matplotlib \
+    tqdm \
+    tensorboard \
+    scikit-learn
+
+# Force NumPy back to 1.23.5 in case any dependency upgraded it.
+RUN python3 -m pip install --force-reinstall numpy==1.23.5
+
+# Quick version check during build
+RUN python3 - <<'PY'
+import numpy
+import cv2
+import torch
+import ultralytics
+
+print("NumPy:", numpy.__version__)
+print("OpenCV:", cv2.__version__)
+print("PyTorch:", torch.__version__)
+print("CUDA available:", torch.cuda.is_available())
+print("Ultralytics:", ultralytics.__version__)
+PY
+
+WORKDIR /workspace/alars_labeling_training
+
+USER ${USER_NAME}
+
+ENV HOME=/home/${USER_NAME}
+ENV PATH=/home/${USER_NAME}/.local/bin:${PATH}

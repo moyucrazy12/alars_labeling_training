@@ -1,3 +1,6 @@
-labeling_pipeline/models/yolo_models/*.pt
-labeling_pipeline/.venv_dino/
+labeling_pipeline/models
 labeling_pipeline/dataset_to_label/
+training_pipeline/dataset_combined
+training_pipeline/base_models
+training_pipeline/runs_yolo_training
+data
