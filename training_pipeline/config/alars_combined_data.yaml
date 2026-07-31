@@ -1,0 +1,10 @@
+names:
+  0: sam
+  1: buoy
+  2: hook
+  3: land_pad
+nc: 4
+path: /workspace/alars_labeling_training/training_pipeline/dataset_combined
+test: images/test
+train: images/train
+val: images/val

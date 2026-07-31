@@ -1,0 +1,24 @@
+model:
+  path: trained_models/yolo_model_4cls_july_sim.pt
+
+data:
+  yaml: training_pipeline/config/alars_combined_data.yaml
+
+test:
+  source: training_pipeline/dataset_combined/images/test
+  task: obb
+
+runs:
+  project: training_pipeline/runs_yolo_training/test_results
+  name: test_current_model
+  prediction_name: pred_current_model
+
+output:
+  save_predictions: true
+
+# Parameters for the model.
+validation:
+  imgsz: 1024
+  batch: 8
+  conf: 0.25
+  iou: 0.45

@@ -1,0 +1,18 @@
+source:
+  # Reads runs.project
+  training_config: training_pipeline/config/train_combined_params.yaml
+
+  # Options from train_combined_paths.yaml: finetune or pretrained
+  model_key: pretrained
+
+  weights_file: best.pt
+
+output:
+  dir: trained_models
+  filename: yolo_model_4cls_august.pt
+
+  # Options:
+  #   error      = stop if file exists
+  #   overwrite  = replace existing file
+  #   timestamp  = add timestamp if file exists
+  if_exists: timestamp

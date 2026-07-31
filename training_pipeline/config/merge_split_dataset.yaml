@@ -1,0 +1,56 @@
+sources:
+  # Previous dataset with a fixed split (already train, val and test folders)
+  - name: old
+    root: data/old_dataset
+    already_split: true
+
+  # New/current dataset from the labeling pipeline (images and labels folders)
+  - name: new
+    root: labeling_pipeline/dataset_to_label_2
+    already_split: false
+
+paths:
+  output_root: training_pipeline/dataset_combined
+  
+  # Dataset YAML fortraining.
+  data_yaml: training_pipeline/config/alars_combined_data.yaml
+
+registry:
+  # Folder-level registry:
+  path: training_pipeline/config/split_registry.csv
+
+split:
+  # Keep existing registry splits, register old split folders, and assign only new unseen folders.
+  mode: registry
+
+  train: 0.80
+  val: 0.10
+  test: 0.10
+
+  seed: 42
+
+  # Warn if a split is more than this many percentage points away from target.
+  balance_warning_threshold_percent: 5.0
+
+output:
+  # copy is safer.
+  # symlink saves disk space but depends on the source folders staying in place.
+  mode: copy
+
+  overwrite: true
+
+  # create_empty = create empty labels for missing .txt files.
+  # error = stop if any image has no label.
+  # skip = skip images with missing labels.
+  missing_label_policy: create_empty
+
+classes:
+  id_to_name:
+    "0": "sam"
+    "1": "buoy"
+    "2": "hook"
+    "3": "land_pad"
+    # "4": "lolo"
+    # "5": "catamaran"
+    # "6": "boat"
+    # "7": "person"

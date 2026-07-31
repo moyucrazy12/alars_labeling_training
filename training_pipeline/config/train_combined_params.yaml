@@ -1,0 +1,19 @@
+data:
+  yaml: training_pipeline/config/alars_combined_data.yaml
+
+runs:
+  project: training_pipeline/runs_yolo_training
+
+models:
+  # Fine-tune from your previous best model.
+  finetune: trained_models/yolo_model_4cls_july_sim.pt
+
+  # Train from official YOLO11 OBB pretrained weights.
+  pretrained:
+    source: yolo11n-obb.pt
+    dir: training_pipeline/base_models
+    download_if_missing: true
+
+names:
+  finetune: M_finetune_combined
+  pretrained: M_pretrained_combined
