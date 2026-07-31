@@ -1,0 +1,112 @@
+rosbag:
+  # Folder containing ROS2 bag folders
+  bags_root: /workspace/data/rosbags
+
+  # Image topic from the ROS2 bag
+  topic: /M350/gimbal_camera/camera/image_raw
+
+  # Use sqlite3 or mcap 
+  storage_id: sqlite3
+
+  # Read every Nth image before DINO selection.
+  # 1 = consider every frame, 2 = every second frame, 5 = every fifth frame
+  every_n: 1
+
+  # Optional time window in seconds, empty to use the full bag.
+  start_sec:
+  end_sec:
+
+  # Maximum number of candidate frames before DINO/HDBSCAN.
+  # 0 = no limit, quick tests = 500
+  max_candidates: 0
+
+paths:
+  # Creates: output/images/<bag_name>, output/labels/<bag_name>, output/reports/<bag_name>
+  output: labeling_pipeline/dataset_to_label
+
+dino:
+  # dinov2_vits14 = fastest, good default (recommended for rosbags)
+  # dinov2_vitb14 = better but slower
+  # dinov2_vitl14 = larger/slower, dinov2_vitg14 = very large/slower
+  model: dinov2_vits14
+
+  # global: compares the full image only
+  # tiles: compares local image regions only
+  # global_tiles: compares full image + local regions (recommended for small objects)
+  embedding_mode: global_tiles
+
+  # Tile layout for local comparison.
+  # For 1920x1080 images, 4 x 3 is a good default (4 x 2 if slow).
+  # For 1280x720 images, 5 x 3 is a good default (4 x 2 if slow).
+  tile_cols: 4
+  tile_rows: 3
+
+  # Tile overlap helps avoid cutting objects at tile borders.
+  # 0.15 means 15% expansion around each tile.
+  tile_overlap: 0.15
+
+  # Relative importance of full image vs local tiles.
+  # Keep both at 1.0 unless you want to tune behavior.
+  global_weight: 1.0
+  tile_weight: 1.0
+
+  # DINO input image size.
+  # 518 is the normal DINOv2 size, 336 for faster processing
+  image_size: 336
+
+hdbscan:
+  # PCA dimension before clustering.
+  # 50 is a good default, 0 disables PCA.
+  pca_dim: 50
+
+  # Minimum group size to consider frames as a repeated cluster.
+  # Higher = less aggressive, keeps more frames.
+  # Lower = more aggressive, removes more similar frames.
+  min_cluster_size: 15
+
+  # Clustering conservativeness.
+  # Higher = more frames treated as unique.
+  # Lower = more aggressive grouping.
+  min_samples: 6
+
+selection:
+  # Keep all frames in small clusters up to this size.
+  small_cluster_keep_all: 10
+
+  # Minimum representatives kept from each repeated cluster.
+  min_keep_per_cluster: 3
+
+  # For large clusters:
+  #   keep_n = ceil(sqrt(cluster_size) * keep_sqrt_factor)
+  # Increase to keep more frames. Decrease to compress more aggressively.
+  keep_sqrt_factor: 2.0
+
+  # Maximum representatives per cluster.
+  # 0 = no maximum.
+  max_keep_per_cluster: 0
+
+output:
+  image_format: jpg
+  jpg_quality: 95
+
+  # Create empty YOLO .txt files
+  create_empty_labels: true
+
+  # Save rejected frames for inspection.
+  # Normal use: false, Debugging/tuning: true.
+  copy_compressed_out: false
+
+  # Only debug: Generate CSV reports and contact sheet images.
+  save_reports: false
+
+  # Only debug: Maximum images shown in report contact sheets
+  max_contact_sheet_images: 120
+
+runtime:
+  device: cuda
+
+  # DINO batch size, reduce if CUDA runs out of memory.
+  batch_size: 16
+
+  # Reuse cached DINO embeddings when settings did not change, makes reruns much faster.
+  reuse_embeddings: true

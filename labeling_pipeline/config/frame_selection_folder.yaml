@@ -1,0 +1,96 @@
+paths:
+  # The script reads: dataset_root/images and dataset_root/labels
+  # and then replaces them with the selected subset.
+  dataset_root: labeling_pipeline/dataset_to_label
+
+dino:
+  # dinov2_vitb14 is a good second-pass/fine-tuning choice after the rosbag script.
+  # dinov2_vits14 = fastest, good default (recommended for rosbags)
+  # dinov2_vitl14 = larger/slower, dinov2_vitg14 = very large/slower
+  model: dinov2_vitb14
+
+  # global: compares the full image only
+  # tiles: compares local image regions only
+  # global_tiles: compares full image + local regions (recommended for small objects)
+  embedding_mode: global_tiles
+
+  # Tile layout for local comparison.
+  # For 1920x1080 images, 4 x 3 is a good default.
+  tile_cols: 4
+  tile_rows: 3
+
+  # Tile overlap helps avoid cutting objects at tile borders.
+  tile_overlap: 0.15
+
+  # Relative importance of full image vs local tiles.
+  global_weight: 1.0
+  tile_weight: 1.0
+
+  # DINO input image size.
+  # 518 is more accurate, 336 is faster.
+  image_size: 518
+
+hdbscan:
+  # PCA dimension before clustering.
+  # 50 is a good default, 0 disables PCA.
+  pca_dim: 50
+
+  # Minimum group size to consider images as a repeated cluster.
+  # Higher = less aggressive, keeps more images.
+  # Lower = more aggressive, removes more similar images.
+  min_cluster_size: 15
+
+  # Clustering conservativeness.
+  # Higher = more images treated as unique.
+  # Lower = more aggressive grouping.
+  min_samples: 6
+
+selection:
+  # Keep all images in small clusters up to this size.
+  small_cluster_keep_all: 10
+
+  # Minimum representatives kept from each repeated cluster.
+  min_keep_per_cluster: 3
+
+  # For large clusters:
+  #   keep_n = ceil(sqrt(cluster_size) * keep_sqrt_factor)
+  # Increase to keep more images. Decrease to compress more aggressively.
+  keep_sqrt_factor: 2.0
+
+  # Maximum representatives per cluster.
+  # 0 = no maximum.
+  max_keep_per_cluster: 0
+
+output:
+  # In-place curation uses a temporary folder first, then replaces images/ and labels/.
+  # Keep copy because symlinks are unsafe when replacing the same dataset directory.
+  mode: copy
+
+  # If an image has no matching label.
+  # create_empty = create empty YOLO label
+  # skip = do not keep selected images without labels
+  # error = stop if any label is missing
+  missing_label_policy: create_empty
+
+  # Backup original images/ and labels/ before replacing them.
+  # Recommended true until you are confident with the thresholds.
+  backup_original: false
+
+  # Save removed images/labels for inspection.
+  # Normal use: false, Debugging/tuning: true.
+  copy_compressed_out: false
+
+  # Only debug: Generate CSV reports and contact sheet images.
+  save_reports: false
+
+  # Only debug: Maximum images shown in report contact sheets.
+  max_contact_sheet_images: 120
+
+runtime:
+  device: cuda
+
+  # DINO batch size, reduce if CUDA runs out of memory.
+  batch_size: 16
+
+  # Reuse cached DINO embeddings when image list/settings did not change.
+  reuse_embeddings: true
