@@ -1,7 +1,7 @@
 paths:
-  image_dir: "dataset_to_label_2/images"
-  label_dir: "dataset_to_label_2/labels"
-  vis_dir: "dataset_to_label_2/visualizations_final"
+  image_dir: "dataset_to_label/images"
+  label_dir: "dataset_to_label/labels"
+  vis_dir: "dataset_to_label/visualizations_final"
 
 models:
   sam2_root: "models/sam2"
@@ -12,6 +12,13 @@ runtime:
   device: "cuda"
   min_mask_area: 20
   save_viz: false
+
+output:
+  # true: save/load as YOLO OBB rows:
+  #   class_id x1 y1 x2 y2 x3 y3 x4 y4
+  # false: save/load as normal YOLO detection rows:
+  #   class_id x_center y_center width height
+  use_obb: true
 
 classes:
   id_to_name:

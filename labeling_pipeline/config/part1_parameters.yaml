@@ -6,7 +6,8 @@ paths:
 models:
   sam3_root: "models/sam3"
   yolo26_model: "models/yolo_models/yoloe-26x-seg.pt"
-  yolo11_model: "models/yolo_models/yolo_model_4cls_july.pt"
+  # Yolo11 finetuned model.
+  yolo11_model: "../trained_models/yolo_model_4cls_july.pt"
 
 runtime:
   device: 0
@@ -15,6 +16,11 @@ runtime:
   save_viz: true
 
 output:
+  # true: YOLO OBB format
+  #   class_id x1 y1 x2 y2 x3 y3 x4 y4
+  # false: normal YOLO detection format
+  #   class_id x_center y_center width height
+  use_obb: true
   # overwrite: replace existing .txt files
   # append: always add generated detections
   # append_unique: preserve existing labels and avoid exact duplicate rows
@@ -37,19 +43,19 @@ classes:
 
 # Model-specific settings.
 yolo26:
-  enabled: true
+  enabled: false
   confidence: 0.45
   labels:
     - boat
 
 yolo11:
-  enabled: false
+  enabled: true
   confidence: 0.45
   labels:
     - land_pad
 
 sam3:
-  enabled: true
+  enabled: false
   confidence: 0.45
   prompts:
     - boat

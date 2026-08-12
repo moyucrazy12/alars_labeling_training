@@ -31,6 +31,7 @@ SAM2_MODEL_CFG = None
 DEVICE = "cuda"
 MIN_MASK_AREA = 20
 SAVE_VIZ = True
+USE_OBB = True
 
 CLASS_NAMES = {}
 
@@ -41,14 +42,7 @@ RESULT_WINDOW = "preview"
 # CONFIG LOADING
 # =========================================================
 def resolve_config_path(config_path_arg) -> Path:
-    """
-    Resolve config paths in a forgiving way.
-
-    Supports:
-      --config labeling_pipeline/config/<file>.yaml
-      --config config/<file>.yaml
-      --config /absolute/path/to/<file>.yaml
-    """
+    """Resolve relative or absolute config paths."""
     path = Path(config_path_arg).expanduser()
 
     if path.is_absolute():
@@ -64,23 +58,11 @@ def resolve_config_path(config_path_arg) -> Path:
         if candidate.exists():
             return candidate.resolve()
 
-    # Return the root-relative path for a clear FileNotFoundError.
     return (Path.cwd() / path).resolve()
 
 
 def resolve_project_path(path_value) -> Path:
-    """
-    Resolve paths from the YAML.
-
-    Paths like:
-      dataset_to_label/images
-      models/sam2
-    are interpreted relative to labeling_pipeline/.
-
-    Paths like:
-      labeling_pipeline/dataset_to_label/images
-    are interpreted relative to the repository root.
-    """
+    """Resolve YAML paths relative to the project/repository."""
     path = Path(path_value).expanduser()
 
     if path.is_absolute():
@@ -110,7 +92,7 @@ def load_config(config_path: Path):
     global CONFIG_PATH, CFG
     global IMAGE_DIR, LABEL_DIR, VIS_DIR
     global SAM2_ROOT, SAM2_CHECKPOINT, SAM2_MODEL_CFG
-    global DEVICE, MIN_MASK_AREA, SAVE_VIZ
+    global DEVICE, MIN_MASK_AREA, SAVE_VIZ, USE_OBB
     global CLASS_NAMES, WINDOW_NAME, RESULT_WINDOW
 
     CONFIG_PATH = resolve_config_path(config_path)
@@ -129,6 +111,9 @@ def load_config(config_path: Path):
     MIN_MASK_AREA = int(runtime_cfg.get("min_mask_area", 20))
     SAVE_VIZ = bool(runtime_cfg.get("save_viz", True))
 
+    output_cfg = CFG.get("output", {})
+    USE_OBB = bool(output_cfg.get("use_obb", True))
+
     CLASS_NAMES = {
         int(class_id): str(class_name)
         for class_id, class_name in CFG["classes"]["id_to_name"].items()
@@ -138,12 +123,14 @@ def load_config(config_path: Path):
     WINDOW_NAME = ui_cfg.get("window_name", "annotator")
     RESULT_WINDOW = ui_cfg.get("result_window", "preview")
 
-    # Make SAM2 importable after the config path is known.
     sys.path.insert(0, str(SAM2_ROOT))
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Part 2 manual correction UI using SAM2."
+        description=(
+            "Part 2 manual correction UI using SAM2 with selectable "
+            "OBB or normal BB labels."
+        )
     )
     parser.add_argument(
         "--config",
@@ -208,55 +195,128 @@ def order_box_points_clockwise(pts: np.ndarray) -> np.ndarray:
     pts = np.roll(pts, -start_idx, axis=0)
     return pts
 
-def mask_to_obb(mask: np.ndarray, min_area: float = 20):
-    mask = (mask > 0).astype(np.uint8) * 255
+def quad_to_rect(box4):
+    return cv2.minAreaRect(np.array(box4, dtype=np.float32))
 
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+def axis_aligned_box_from_xyxy(x1, y1, x2, y2) -> np.ndarray:
+    x_min, x_max = sorted((float(x1), float(x2)))
+    y_min, y_max = sorted((float(y1), float(y2)))
+
+    return np.array(
+        [
+            [x_min, y_min],
+            [x_max, y_min],
+            [x_max, y_max],
+            [x_min, y_max],
+        ],
+        dtype=np.float32,
+    )
+
+def axis_aligned_box_from_quad(box4: np.ndarray) -> np.ndarray:
+    box4 = np.asarray(box4, dtype=np.float32)
+    return axis_aligned_box_from_xyxy(
+        np.min(box4[:, 0]),
+        np.min(box4[:, 1]),
+        np.max(box4[:, 0]),
+        np.max(box4[:, 1]),
+    )
+
+def build_box_metadata(box: np.ndarray, area=None, rectangularity=None, angle_deg=None):
+    box = order_box_points_clockwise(np.asarray(box, dtype=np.float32))
+    rect = quad_to_rect(box)
+    (_, _), (width, height), _ = rect
+
+    if width <= 0 or height <= 0:
+        return None
+
+    if area is None:
+        area = float(cv2.contourArea(box.astype(np.float32)))
+
+    long_side = max(width, height)
+    short_side = min(width, height)
+
+    result = {
+        "rect": rect,
+        "box": box,
+        "area": float(area),
+        "aspect_ratio": long_side / (short_side + 1e-6),
+        "rectangularity": rectangularity,
+    }
+
+    if angle_deg is not None:
+        result["angle_deg"] = float(angle_deg)
+
+    return result
+
+def mask_to_obb(mask: np.ndarray, min_area: float = 20):
+    mask_u8 = (mask > 0).astype(np.uint8) * 255
+
+    contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
 
     cnt = max(contours, key=cv2.contourArea)
-    area = cv2.contourArea(cnt)
+    area = float(cv2.contourArea(cnt))
     if area < min_area:
         return None
 
     rect = cv2.minAreaRect(cnt)
     box = cv2.boxPoints(rect)
-    box = order_box_points_clockwise(box)
+    (_, _), (width, height), _ = rect
 
-    (cx, cy), (w, h), angle = rect
-    if w <= 0 or h <= 0:
+    if width <= 0 or height <= 0:
         return None
 
-    long_side = max(w, h)
-    short_side = min(w, h)
-    aspect_ratio = long_side / (short_side + 1e-6)
-    rectangularity = area / (w * h + 1e-6)
+    rectangularity = area / (width * height + 1e-6)
+    return build_box_metadata(box, area=area, rectangularity=rectangularity)
 
-    return {
-        "rect": rect,
-        "box": box,
-        "area": area,
-        "aspect_ratio": aspect_ratio,
-        "rectangularity": rectangularity,
-    }
+def mask_to_normal_bb(mask: np.ndarray, min_area: float = 20, padding_px: float = 0.0):
+    mask_u8 = (mask > 0).astype(np.uint8)
+    ys, xs = np.where(mask_u8 > 0)
+
+    if len(xs) < min_area:
+        return None
+
+    x_min = max(0.0, float(xs.min()) - padding_px)
+    x_max = float(xs.max()) + padding_px
+    y_min = max(0.0, float(ys.min()) - padding_px)
+    y_max = float(ys.max()) + padding_px
+
+    box = axis_aligned_box_from_xyxy(x_min, y_min, x_max, y_max)
+    box_area = max((x_max - x_min) * (y_max - y_min), 1e-6)
+    mask_area = float(np.count_nonzero(mask_u8))
+
+    return build_box_metadata(
+        box,
+        area=mask_area,
+        rectangularity=mask_area / box_area,
+        angle_deg=0.0,
+    )
+
+def mask_to_selected_box(mask: np.ndarray, min_area: float = 20):
+    if USE_OBB:
+        return mask_to_obb(mask, min_area=min_area)
+    return mask_to_normal_bb(mask, min_area=min_area)
 
 def get_obb_angle_deg(obb):
-    """
-    Estimate current OBB orientation from the first edge.
-    """
     box = obb["box"].astype(np.float32)
-
     edge = box[1] - box[0]
-    angle_deg = np.rad2deg(np.arctan2(edge[1], edge[0]))
+    return float(np.rad2deg(np.arctan2(edge[1], edge[0])))
 
-    return float(angle_deg)
 
-def quad_to_rect(box4):
-    return cv2.minAreaRect(np.array(box4, dtype=np.float32))
+def get_display_box(obj) -> np.ndarray:
+    box = obj["obb"]["box"].astype(np.float32)
+    if USE_OBB:
+        return box
+    return axis_aligned_box_from_quad(box)
+
 
 def set_selected_obb_angle_from_two_points(p1, p2):
     global saved_objects, selected_object_index
+
+    if not USE_OBB:
+        print("Orientation editing is disabled in normal-BB mode.")
+        return
 
     if not saved_objects:
         print("No object selected")
@@ -278,7 +338,6 @@ def set_selected_obb_angle_from_two_points(p1, p2):
         return
 
     angle_deg = float(np.rad2deg(np.arctan2(delta[1], delta[0])))
-
     new_obb = obb_from_mask_at_angle(
         mask,
         angle_deg,
@@ -330,72 +389,28 @@ def obb_from_mask_at_angle(mask: np.ndarray, angle_deg: float, min_area: float =
     box = order_box_points_clockwise(corners)
 
     rect = cv2.minAreaRect(box)
-    (_, _), (w, h), _ = rect
+    (_, _), (width, height), _ = rect
 
-    if w <= 0 or h <= 0:
+    if width <= 0 or height <= 0:
         return None
 
     area = float(np.count_nonzero(mask_u8))
-    long_side = max(w, h)
-    short_side = min(w, h)
-    aspect_ratio = long_side / (short_side + 1e-6)
-    rectangularity = area / (w * h + 1e-6)
+    rectangularity = area / (width * height + 1e-6)
 
-    return {
-        "rect": rect,
-        "box": box,
-        "area": area,
-        "aspect_ratio": aspect_ratio,
-        "rectangularity": rectangularity,
-        "angle_deg": float(angle_deg),
-    }
-
-def get_object_rotation_center(obj):
-    """
-    Rotate around the SAM2 segmentation center if a mask exists.
-    If the object was loaded from file and has no mask, rotate around OBB center.
-    """
-    mask = obj.get("mask", None)
-
-    if mask is not None:
-        ys, xs = np.where(mask > 0)
-        if len(xs) > 0:
-            return np.array([xs.mean(), ys.mean()], dtype=np.float32)
-
-    box = obj["obb"]["box"].astype(np.float32)
-    return np.mean(box, axis=0).astype(np.float32)
-
-
-def rotate_obb_around_center(obb, center, angle_deg):
-    box = obb["box"].astype(np.float32)
-
-    theta = np.deg2rad(angle_deg)
-    R = np.array([
-        [np.cos(theta), -np.sin(theta)],
-        [np.sin(theta),  np.cos(theta)],
-    ], dtype=np.float32)
-
-    rotated_box = (box - center) @ R.T + center
-    rotated_box = order_box_points_clockwise(rotated_box)
-
-    rect = quad_to_rect(rotated_box)
-    (_, _), (w, h), _ = rect
-
-    area = cv2.contourArea(rotated_box.astype(np.float32))
-    long_side = max(w, h)
-    short_side = min(w, h)
-
-    obb["box"] = rotated_box
-    obb["rect"] = rect
-    obb["area"] = area
-    obb["aspect_ratio"] = long_side / (short_side + 1e-6)
-    obb["rectangularity"] = None
-
-    return obb
+    return build_box_metadata(
+        box,
+        area=area,
+        rectangularity=rectangularity,
+        angle_deg=angle_deg,
+    )
 
 
 def rotate_selected_obb(angle_delta_deg):
     global saved_objects, selected_object_index
+
+    if not USE_OBB:
+        print("Rotation is disabled in normal-BB mode.")
+        return
 
     if not saved_objects:
         print("No object selected to rotate")
@@ -409,7 +424,6 @@ def rotate_selected_obb(angle_delta_deg):
         current_angle = get_obb_angle_deg(obj["obb"])
 
     new_angle = current_angle + angle_delta_deg
-
     mask = obj.get("mask", None)
 
     if mask is not None:
@@ -432,8 +446,8 @@ def rotate_selected_obb(angle_delta_deg):
 
     else:
         print(
-            "Selected object has no mask, so I cannot guarantee full segmentation coverage. "
-            "This usually happens for labels loaded from file or manual OBBs."
+            "Selected object has no mask, so rotation cannot guarantee "
+            "full segmentation coverage."
         )
 
 def create_obb_from_4_points(points4):
@@ -443,27 +457,19 @@ def create_obb_from_4_points(points4):
 
     rect = cv2.minAreaRect(pts)
     box = cv2.boxPoints(rect)
-    box = order_box_points_clockwise(box)
+    return build_box_metadata(box, rectangularity=None)
 
-    (cx, cy), (w, h), angle = rect
-    if w <= 0 or h <= 0:
+def create_normal_bb_from_2_points(points2):
+    pts = np.array(points2, dtype=np.float32)
+    if pts.shape != (2, 2):
         return None
 
-    area = cv2.contourArea(box.astype(np.float32))
-    long_side = max(w, h)
-    short_side = min(w, h)
-    aspect_ratio = long_side / (short_side + 1e-6)
+    box = axis_aligned_box_from_xyxy(
+        pts[0, 0], pts[0, 1], pts[1, 0], pts[1, 1]
+    )
+    return build_box_metadata(box, rectangularity=None, angle_deg=0.0)
 
-    return {
-        "rect": rect,
-        "box": box,
-        "area": area,
-        "aspect_ratio": aspect_ratio,
-        "rectangularity": None,
-    }
-
-
-def point_inside_obb(x, y, box):
+def point_inside_box(x, y, box):
     contour = np.array(box, dtype=np.float32)
     return cv2.pointPolygonTest(contour, (float(x), float(y)), False) >= 0
 
@@ -471,15 +477,15 @@ def point_inside_obb(x, y, box):
 def find_object_at_point(x, y, objects):
     hits = []
     for idx, obj in enumerate(objects):
-        box = obj["obb"]["box"]
-        if point_inside_obb(x, y, box):
-            area = obj["obb"].get("area", 1e9)
+        box = get_display_box(obj)
+        if point_inside_box(x, y, box):
+            area = abs(float(cv2.contourArea(box.astype(np.float32))))
             hits.append((area, idx))
 
     if not hits:
         return None
 
-    hits.sort(key=lambda t: t[0])
+    hits.sort(key=lambda item: item[0])
     return hits[0][1]
 
 # =========================================================
@@ -499,55 +505,131 @@ def get_vis_path(img_path: Path) -> Path:
     _, vis_path = get_relative_paths(img_path)
     return vis_path
 
-def save_yolo_obb(txt_path: Path, image_shape, objects):
+def save_yolo_labels(txt_path: Path, image_shape, objects):
+    """Save either OBB or normal YOLO detection labels."""
     ensure_dir(txt_path.parent)
-    h, w = image_shape[:2]
+    height, width = image_shape[:2]
 
     with open(txt_path, "w", encoding="utf-8") as f:
         for obj in objects:
-            class_id = obj["class_id"]
+            class_id = int(obj["class_id"])
             box = obj["obb"]["box"].astype(np.float32).copy()
 
-            box[:, 0] /= w
-            box[:, 1] /= h
+            if USE_OBB:
+                box = order_box_points_clockwise(box)
+                box[:, 0] = np.clip(box[:, 0] / width, 0.0, 1.0)
+                box[:, 1] = np.clip(box[:, 1] / height, 0.0, 1.0)
 
-            vals = [str(class_id)] + [f"{v:.6f}" for pt in box for v in pt]
-            f.write(" ".join(vals) + "\n")
+                values = [str(class_id)] + [
+                    f"{value:.6f}" for point in box for value in point
+                ]
+            else:
+                x_min = float(np.clip(np.min(box[:, 0]), 0, width))
+                x_max = float(np.clip(np.max(box[:, 0]), 0, width))
+                y_min = float(np.clip(np.min(box[:, 1]), 0, height))
+                y_max = float(np.clip(np.max(box[:, 1]), 0, height))
 
-def load_yolo_obb(txt_path: Path, image_shape):
-    h, w = image_shape[:2]
+                x_center = ((x_min + x_max) / 2.0) / width
+                y_center = ((y_min + y_max) / 2.0) / height
+                box_width = (x_max - x_min) / width
+                box_height = (y_max - y_min) / height
+
+                values = [
+                    str(class_id),
+                    f"{x_center:.6f}",
+                    f"{y_center:.6f}",
+                    f"{box_width:.6f}",
+                    f"{box_height:.6f}",
+                ]
+
+            f.write(" ".join(values) + "\n")
+
+def load_yolo_labels(txt_path: Path, image_shape):
+    """
+    Load either OBB rows (9 fields) or normal-BB rows (5 fields).
+
+    Internally, both formats are represented as four corner points. Saving
+    converts every object to the format selected by output.use_obb.
+    """
+    height, width = image_shape[:2]
     objects = []
 
     if not txt_path.exists():
         return objects
 
     with open(txt_path, "r", encoding="utf-8") as f:
-        lines = [line.strip() for line in f.readlines() if line.strip()]
+        lines = [line.strip() for line in f if line.strip()]
 
-    for line in lines:
+    detected_formats = set()
+
+    for line_number, line in enumerate(lines, start=1):
         parts = line.split()
-        if len(parts) != 9:
+
+        try:
+            class_id = int(float(parts[0]))
+        except (ValueError, IndexError):
+            print(f"[WARN] Invalid class ID at {txt_path}:{line_number}; skipped")
             continue
 
-        class_id = int(float(parts[0]))
-        coords = np.array(list(map(float, parts[1:])), dtype=np.float32).reshape(4, 2)
-        coords[:, 0] *= w
-        coords[:, 1] *= h
-        coords = order_box_points_clockwise(coords)
+        try:
+            if len(parts) == 9:
+                detected_formats.add("OBB")
+                coords = np.array(
+                    list(map(float, parts[1:])), dtype=np.float32
+                ).reshape(4, 2)
+                coords[:, 0] *= width
+                coords[:, 1] *= height
+                coords = order_box_points_clockwise(coords)
 
-        objects.append({
-            "class_id": class_id,
-            "source": "file",
-            "confidence": 1.0,
-            "obb": {
-                "rect": quad_to_rect(coords),
-                "box": coords,
-                "area": cv2.contourArea(coords.astype(np.float32)),
-                "aspect_ratio": None,
-                "rectangularity": None,
-            },
-            "mask": None,
-        })
+            elif len(parts) == 5:
+                detected_formats.add("normal BB")
+                x_center, y_center, box_width, box_height = map(float, parts[1:])
+
+                x_center *= width
+                y_center *= height
+                box_width *= width
+                box_height *= height
+
+                coords = axis_aligned_box_from_xyxy(
+                    x_center - box_width / 2.0,
+                    y_center - box_height / 2.0,
+                    x_center + box_width / 2.0,
+                    y_center + box_height / 2.0,
+                )
+
+            else:
+                print(
+                    f"[WARN] Unsupported row with {len(parts)} fields at "
+                    f"{txt_path}:{line_number}; skipped"
+                )
+                continue
+
+        except ValueError:
+            print(f"[WARN] Invalid coordinates at {txt_path}:{line_number}; skipped")
+            continue
+
+        metadata = build_box_metadata(coords, rectangularity=None)
+        if metadata is None:
+            print(f"[WARN] Degenerate box at {txt_path}:{line_number}; skipped")
+            continue
+
+        objects.append(
+            {
+                "class_id": class_id,
+                "source": "file",
+                "confidence": 1.0,
+                "obb": metadata,
+                "mask": None,
+            }
+        )
+
+    selected_format = "OBB" if USE_OBB else "normal BB"
+    for detected_format in sorted(detected_formats):
+        if detected_format != selected_format:
+            print(
+                f"[INFO] Loaded {detected_format} labels. They will be converted "
+                f"to {selected_format} when saved."
+            )
 
     return objects
 
@@ -567,74 +649,81 @@ def draw_cross(img, x, y, color):
 def object_color(source: str):
     if source == "sam2":
         return (0, 255, 0)
-    if source == "manual_obb":
+    if source in {"manual_obb", "manual_bb"}:
         return (255, 0, 255)
     if source == "file":
         return (200, 200, 200)
     return (200, 200, 200)
 
-def draw_ui(image, current_points, current_point_labels, objects, active_class_id,
-            img_name, img_idx, total_imgs, selected_idx):
+def draw_ui(image, current_points, current_point_labels, objects, active_class_id, img_name, img_idx, total_imgs, selected_idx):
     vis = image.copy()
 
-    for i, obj in enumerate(objects):
-        obb = obj["obb"]
+    for index, obj in enumerate(objects):
         class_id = obj["class_id"]
         class_name = CLASS_NAMES.get(class_id, str(class_id))
         source = obj.get("source", "unknown")
-        conf = obj.get("confidence", None)
+        confidence = obj.get("confidence", None)
 
-        box = obb["box"].astype(np.int32)
+        box = get_display_box(obj).astype(np.int32)
         color = object_color(source)
-        thickness = 3 if i == selected_idx else 2
+        thickness = 3 if index == selected_idx else 2
         cv2.polylines(vis, [box], True, color, thickness)
 
-        cx, cy = np.mean(box, axis=0).astype(int)
-        label = f"{i}:{class_id}-{class_name}"
-        if conf is not None:
-            label += f" {conf:.2f}"
+        center_x, center_y = np.mean(box, axis=0).astype(int)
+        label = f"{index}:{class_id}-{class_name}"
+        if confidence is not None:
+            label += f" {confidence:.2f}"
         label += f" [{source}]"
 
         cv2.putText(
-            vis, label, (cx, cy),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA
+            vis, label,(center_x, center_y),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA,
         )
 
-    for (x, y), lab in zip(current_points, current_point_labels):
-        color = (0, 255, 0) if lab == 1 else (0, 0, 255)
+    for (x, y), point_label in zip(current_points, current_point_labels):
+        color = (0, 255, 0) if point_label == 1 else (0, 0, 255)
         draw_cross(vis, x, y, color)
 
     global manual_obb_mode, manual_obb_points
     if manual_obb_mode:
-        for i, (px, py) in enumerate(manual_obb_points):
-            cv2.circle(vis, (int(px), int(py)), 4, (255, 0, 255), -1)
+        required_points = 4 if USE_OBB else 2
+        mode_name = "MANUAL OBB" if USE_OBB else "MANUAL BB"
+
+        for index, (point_x, point_y) in enumerate(manual_obb_points):
+            cv2.circle(vis, (int(point_x), int(point_y)), 4, (255, 0, 255), -1)
             cv2.putText(
-                vis, str(i + 1), (int(px) + 4, int(py) - 4),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1, cv2.LINE_AA
+                vis, str(index + 1), (int(point_x) + 4, int(point_y) - 4),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1, cv2.LINE_AA,
             )
 
         if len(manual_obb_points) >= 2:
             pts = np.array(manual_obb_points, dtype=np.int32)
-            cv2.polylines(vis, [pts], False, (255, 0, 255), 1)
+            if USE_OBB:
+                cv2.polylines(vis, [pts], False, (255, 0, 255), 1)
+            else:
+                preview_box = axis_aligned_box_from_xyxy(
+                    pts[0, 0], pts[0, 1], pts[-1, 0], pts[-1, 1]
+                ).astype(np.int32)
+                cv2.polylines(vis, [preview_box], True, (255, 0, 255), 1)
 
         cv2.putText(
             vis,
-            f"MANUAL OBB MODE: click 4 corners ({len(manual_obb_points)}/4)",
+            f"{mode_name} MODE: click {required_points} point(s) ({len(manual_obb_points)}/{required_points})",
             (10, 136),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.55,
             (255, 0, 255),
             2,
-            cv2.LINE_AA
+            cv2.LINE_AA,
         )
 
     global orientation_line_mode, orientation_line_points
     if orientation_line_mode:
-        for i, (px, py) in enumerate(orientation_line_points):
-            cv2.circle(vis, (int(px), int(py)), 5, (0, 255, 255), -1)
+        for index, (point_x, point_y) in enumerate(orientation_line_points):
+            cv2.circle(vis, (int(point_x), int(point_y)), 5, (0, 255, 255), -1)
             cv2.putText(
-                vis, str(i + 1),
-                (int(px) + 5, int(py) - 5),
+                vis, str(index + 1),
+                (int(point_x) + 5, int(point_y) - 5),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
                 (0, 255, 255),
@@ -658,12 +747,18 @@ def draw_ui(image, current_points, current_point_labels, objects, active_class_i
         )
 
     active_name = CLASS_NAMES.get(active_class_id, str(active_class_id))
+    box_format = "OBB" if USE_OBB else "normal BB"
 
-    header1 = f"Image [{img_idx + 1}/{total_imgs}] {img_name}"
+    header1 = f"Image [{img_idx + 1}/{total_imgs}] {img_name} | Format: {box_format}"
     header2 = f"Active class: {active_class_id} ({active_name}) | Selected object: {selected_idx if objects else 'none'}"
-    header3 = "Keys: 0-9 class | Space add SAM2 obj | arrows rotate/refit OBB | o align OBB | m manual OBB | x delete"
+    
+    if USE_OBB:
+        header3 = "Keys: 0-9 class | Space add SAM2 obj | arrows rotate/refit OBB | o align OBB | m manual OBB | x delete"
+    else:
+        header3 = "Keys: 0-9 class | Space add SAM2 obj | m manual BB (2 corners) | x delete"
+
     header4 = "s save | a/d prev/next | w save+next | u undo | c clear clicks | Esc cancel manual | q quit"
-    header5 = "Mouse: click OBB=select | Left empty=positive | Right empty=negative | Middle OBB=delete"
+    header5 = "Mouse: click box=select | Left empty=positive | Right empty=negative | Middle box=delete"
 
     cv2.putText(vis, header1, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 255, 255), 2, cv2.LINE_AA)
     cv2.putText(vis, header2, (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.60, (0, 255, 255), 2, cv2.LINE_AA)
@@ -673,23 +768,40 @@ def draw_ui(image, current_points, current_point_labels, objects, active_class_i
 
     return vis
 
-def build_result_preview(image, mask, obb, class_id, source="sam2"):
+def build_result_preview(image, mask, box_data, class_id, source="sam2"):
     result = image.copy()
 
     overlay = result.copy()
     overlay[mask > 0] = [0, 200, 255]
     result = cv2.addWeighted(overlay, 0.3, result, 0.7, 0)
 
-    if obb is not None:
-        box = obb["box"].astype(np.int32)
+    if box_data is not None:
+        box = box_data["box"].astype(np.int32)
         cv2.polylines(result, [box], True, object_color(source), 2)
 
-        (cx, cy), (w, h), angle = obb["rect"]
+        (center_x, center_y), (width, height), angle = box_data["rect"]
         class_name = CLASS_NAMES.get(class_id, str(class_id))
-        txt = f"{class_id}:{class_name} [{source}] | w={w:.1f} h={h:.1f} a={angle:.1f}"
+
+        if USE_OBB:
+            text = (
+                f"{class_id}:{class_name} [{source}] | "
+                f"w={width:.1f} h={height:.1f} a={angle:.1f}"
+            )
+        else:
+            text = (
+                f"{class_id}:{class_name} [{source}] | "
+                f"w={width:.1f} h={height:.1f}"
+            )
+
         cv2.putText(
-            result, txt, (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA
+            result,
+            text,
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
         )
 
     return result
@@ -719,20 +831,33 @@ def mouse_callback(event, x, y, flags, param):
     if manual_obb_mode:
         if event == cv2.EVENT_LBUTTONDOWN:
             manual_obb_points.append([x, y])
-            print(f"Manual OBB point {len(manual_obb_points)}: ({x}, {y})")
+            required_points = 4 if USE_OBB else 2
+            box_name = "OBB" if USE_OBB else "BB"
+            print(f"Manual {box_name} point {len(manual_obb_points)}: ({x}, {y})")
 
-            if len(manual_obb_points) == 4:
-                obb = create_obb_from_4_points(manual_obb_points)
-                if obb is not None:
-                    saved_objects.append({
-                        "class_id": current_class_id,
-                        "source": "manual_obb",
-                        "confidence": 1.0,
-                        "obb": obb,
-                        "mask": None,
-                    })
+            if len(manual_obb_points) == required_points:
+                if USE_OBB:
+                    box_data = create_obb_from_4_points(manual_obb_points)
+                    source = "manual_obb"
+                else:
+                    box_data = create_normal_bb_from_2_points(manual_obb_points)
+                    source = "manual_bb"
+
+                if box_data is not None:
+                    saved_objects.append(
+                        {
+                            "class_id": current_class_id,
+                            "source": source,
+                            "confidence": 1.0,
+                            "obb": box_data,
+                            "mask": None,
+                        }
+                    )
                     selected_object_index = len(saved_objects) - 1
-                    print(f"Added manual OBB: class {current_class_id} ({CLASS_NAMES[current_class_id]})")
+                    print(
+                        f"Added manual {box_name}: class {current_class_id} "
+                        f"({CLASS_NAMES[current_class_id]})"
+                    )
 
                 manual_obb_points = []
                 manual_obb_mode = False
@@ -803,7 +928,7 @@ def load_image_at_index(idx):
 
     label_path = get_label_path(img_path)
     if label_path.exists():
-        saved_objects = load_yolo_obb(label_path, current_image_bgr.shape)
+        saved_objects = load_yolo_labels(label_path, current_image_bgr.shape)
         print(f"\nLoaded existing labels from file: {label_path}")
     else:
         saved_objects = []
@@ -816,9 +941,10 @@ def save_current_image():
     img_path = image_paths[current_image_index]
     txt_path = get_label_path(img_path)
 
-    save_yolo_obb(txt_path, current_image_bgr.shape, saved_objects)
+    save_yolo_labels(txt_path, current_image_bgr.shape, saved_objects)
 
-    print(f"Saved labels: {txt_path}")
+    selected_format = "OBB" if USE_OBB else "normal BB"
+    print(f"Saved {selected_format} labels: {txt_path}")
 
     if SAVE_VIZ:
         vis_path = get_vis_path(img_path)
@@ -857,9 +983,12 @@ def main():
         print(f"No images found in {IMAGE_DIR}")
         return
 
+    selected_format = "OBB" if USE_OBB else "normal BB"
+
     print("[INFO] Configuration loaded from:", CONFIG_PATH)
     print("[INFO] Image directory:", IMAGE_DIR)
     print("[INFO] Label directory:", LABEL_DIR)
+    print("[INFO] Bounding-box format:", selected_format)
     print("[INFO] Save visualizations:", SAVE_VIZ)
     if SAVE_VIZ:
         print("[INFO] Visualization directory:", VIS_DIR)
@@ -873,28 +1002,34 @@ def main():
     sam2_predictor = SAM2ImagePredictor(sam2_model)
 
     print("\nClasses:")
-    for k, v in CLASS_NAMES.items():
-        print(f"  {k} = {v}")
+    for key, value in CLASS_NAMES.items():
+        print(f"  {key} = {value}")
 
     print("\nControls:")
-    print("  Left click  = select object if on OBB, otherwise positive SAM2 point")
-    print("  Right click = select object if on OBB, otherwise negative SAM2 point")
-    print("  Middle click= delete object if on OBB")
-    print("  0..9        = select class")
-    print("  Space       = run SAM2 and add object")
-    print("  m           = manual OBB mode (click 4 corners)")
-    print("  o           = orientation mode: click 2 points to align selected OBB")
-    print("  Backspace   = remove last manual OBB point")
-    print("  Esc         = cancel manual OBB mode")
-    print("  x           = delete selected object")
-    print("  Left/Right  = rotate selected OBB -/+ 1 degree")
-    print("  Down/Up     = rotate selected OBB -/+ 5 degrees")
-    print("  c           = clear current SAM2 clicks")
-    print("  u           = undo last object")
-    print("  s           = save current image")
-    print("  a / d       = previous / next image")
-    print("  w           = save and next")
-    print("  q           = quit")
+    print("  Left click   = select object if on box, otherwise positive SAM2 point")
+    print("  Right click  = select object if on box, otherwise negative SAM2 point")
+    print("  Middle click = delete object if on box")
+    print("  0..9         = select class")
+    print("  Space        = run SAM2 and add object")
+
+    if USE_OBB:
+        print("  m            = manual OBB mode (click 4 corners)")
+        print("  o            = orientation mode: click 2 points to align selected OBB")
+        print("  Left/Right   = rotate selected OBB -/+ 1 degree")
+        print("  Down/Up      = rotate selected OBB -/+ 5 degrees")
+    else:
+        print("  m            = manual normal-BB mode (click 2 opposite corners)")
+        print("  Rotation/orientation controls are disabled in normal-BB mode")
+
+    print("  Backspace    = remove last manual-box point")
+    print("  Esc          = cancel manual-box/orientation mode")
+    print("  x            = delete selected object")
+    print("  c            = clear current SAM2 clicks")
+    print("  u            = undo last object")
+    print("  s            = save current image")
+    print("  a / d        = previous / next image")
+    print("  w            = save and next")
+    print("  q            = quit")
 
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
     cv2.namedWindow(RESULT_WINDOW, cv2.WINDOW_NORMAL)
@@ -950,6 +1085,10 @@ def main():
             rotate_selected_obb(5.0)
 
         elif key == ord("o"):
+            if not USE_OBB:
+                print("Orientation mode is disabled in normal-BB mode.")
+                continue
+
             orientation_line_mode = True
             orientation_line_points = []
             points = []
@@ -959,7 +1098,7 @@ def main():
 
         elif key == ord(" "):
             if manual_obb_mode:
-                print("Finish or cancel manual OBB mode first.")
+                print("Finish or cancel manual box mode first.")
                 continue
 
             if len(points) == 0:
@@ -972,32 +1111,34 @@ def main():
             masks, scores, _ = sam2_predictor.predict(
                 point_coords=input_points,
                 point_labels=input_labels,
-                multimask_output=True
+                multimask_output=True,
             )
 
             best_idx = int(np.argmax(scores))
             best_mask = masks[best_idx]
 
-            obb = mask_to_obb(best_mask, min_area=MIN_MASK_AREA)
-            if obb is None:
-                print("No valid OBB found from SAM2 mask")
+            box_data = mask_to_selected_box(best_mask, min_area=MIN_MASK_AREA)
+            if box_data is None:
+                print("No valid box found from SAM2 mask")
                 continue
 
-            obb["angle_deg"] = get_obb_angle_deg(obb)
+            if USE_OBB:
+                box_data["angle_deg"] = get_obb_angle_deg(box_data)
 
             saved_objects.append({
                 "class_id": current_class_id,
                 "source": "sam2",
                 "confidence": float(scores[best_idx]),
-                "obb": obb,
+                "obb": box_data,
                 "mask": best_mask.copy(),
             })
             selected_object_index = len(saved_objects) - 1
 
-            preview = build_result_preview(current_image_bgr, best_mask, obb, current_class_id, source="sam2")
+            preview = build_result_preview(current_image_bgr, best_mask, box_data, current_class_id, source="sam2")
             cv2.imshow(RESULT_WINDOW, preview)
 
-            print(f"Added SAM2 object: class {current_class_id} ({CLASS_NAMES[current_class_id]})")
+            box_name = "OBB" if USE_OBB else "normal BB"
+            print(f"Added SAM2 {box_name}: class {current_class_id} ({CLASS_NAMES[current_class_id]})")
             points = []
             point_labels = []
 
@@ -1006,18 +1147,28 @@ def main():
             manual_obb_points = []
             points = []
             point_labels = []
-            print(f"Manual OBB mode enabled for class {current_class_id} ({CLASS_NAMES[current_class_id]})")
+            orientation_line_mode = False
+            orientation_line_points = []
+
+            box_name = "OBB" if USE_OBB else "normal BB"
+            required_points = 4 if USE_OBB else 2
+            print(f"Manual {box_name} mode enabled for class {current_class_id} ({CLASS_NAMES[current_class_id]}). Click {required_points} point(s).")
 
         elif key in {8, 127} or key_raw in {8, 127, 65288}:
             if manual_obb_mode and manual_obb_points:
                 manual_obb_points.pop()
-                print("Removed last manual OBB point")
+                print("Removed last manual-box point")
 
         elif key == 27:
             if manual_obb_mode:
                 manual_obb_mode = False
                 manual_obb_points = []
-                print("Cancelled manual OBB mode")
+                print("Cancelled manual box mode")
+
+            if orientation_line_mode:
+                orientation_line_mode = False
+                orientation_line_points = []
+                print("Cancelled orientation mode")
 
         elif key == ord("c"):
             points = []

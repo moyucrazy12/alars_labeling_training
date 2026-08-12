@@ -39,6 +39,7 @@ SAVE_VIZ = True
 
 LEGACY_CONFIDENCE = 0.45
 LABEL_WRITE_MODE = "append_unique"
+USE_OBB = True
 
 MIN_MASK_AREA = 20
 IOU_MATCH_THRESH = 0.15
@@ -144,7 +145,7 @@ def load_config(config_path: Path):
     global DATASET_DIR, OUTPUT_LABEL_DIR, OUTPUT_VIZ_DIR
     global YOLO26_MODEL_PATH, YOLO11_MODEL_PATH, SAM3_ROOT
     global DEVICE, IMG_SIZE, IOU_THRES, SAVE_VIZ
-    global LEGACY_CONFIDENCE, LABEL_WRITE_MODE
+    global LEGACY_CONFIDENCE, LABEL_WRITE_MODE, USE_OBB
     global MIN_MASK_AREA, IOU_MATCH_THRESH
     global CLASS_ID_TO_NAME, CLASS_NAME_TO_ID
     global USE_YOLO26, YOLO26_CONFIDENCE, YOLO26_LABELS
@@ -172,14 +173,23 @@ def load_config(config_path: Path):
     # runtime.conf_thres as one shared YOLO confidence threshold.
     LEGACY_CONFIDENCE = float(runtime_cfg.get("conf_thres", 0.45))
 
+    output_cfg = CFG.get("output", {})
+
     LABEL_WRITE_MODE = str(
-        CFG.get("output", {}).get("label_write_mode", "append_unique")
+        output_cfg.get("label_write_mode", "append_unique")
     ).lower().strip()
     if LABEL_WRITE_MODE not in {"overwrite", "append", "append_unique"}:
         raise ValueError(
             "output.label_write_mode must be one of: "
             "overwrite, append, append_unique"
         )
+
+    raw_use_obb = output_cfg.get("use_obb", True)
+    if not isinstance(raw_use_obb, bool):
+        raise ValueError(
+            "output.use_obb must be a YAML boolean: true or false"
+        )
+    USE_OBB = raw_use_obb
 
     MIN_MASK_AREA = int(CFG["merge"].get("min_mask_area", 20))
     IOU_MATCH_THRESH = float(CFG["merge"].get("iou_match_thresh", 0.15))
@@ -226,7 +236,10 @@ def load_config(config_path: Path):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Part 1 automatic labeling with YOLO/SAM3 and YOLO OBB labels."
+        description=(
+            "Part 1 automatic labeling with YOLO/SAM3 and selectable "
+            "YOLO OBB or normal BB labels."
+        )
     )
     parser.add_argument(
         "--config",
@@ -327,12 +340,55 @@ def resize_mask(mask: np.ndarray, image_shape):
         mask = cv2.resize(mask.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
     return (mask > 0).astype(np.uint8)
 
-def format_yolo_obb_row(class_id: int, pts_norm: np.ndarray) -> str:
-    vals = [str(class_id)] + [f"{v:.6f}" for v in pts_norm.reshape(-1)]
-    return " ".join(vals)
+def obb_to_xyxy(obb: np.ndarray) -> np.ndarray:
+    """Convert four OBB corner points to an axis-aligned xyxy box."""
+    x_min = float(np.min(obb[:, 0]))
+    y_min = float(np.min(obb[:, 1]))
+    x_max = float(np.max(obb[:, 0]))
+    y_max = float(np.max(obb[:, 1]))
+    return np.array([x_min, y_min, x_max, y_max], dtype=np.float32)
 
-def canonicalize_yolo_obb_line(line: str):
-    """Return a normalized representation used for exact duplicate checks."""
+def xyxy_to_normalized_xywh(xyxy: np.ndarray, w: int, h: int) -> np.ndarray:
+    """Convert pixel xyxy coordinates to normalized YOLO xywh coordinates."""
+    x1, y1, x2, y2 = xyxy.astype(np.float32)
+
+    x1 = float(np.clip(x1, 0.0, float(w)))
+    x2 = float(np.clip(x2, 0.0, float(w)))
+    y1 = float(np.clip(y1, 0.0, float(h)))
+    y2 = float(np.clip(y2, 0.0, float(h)))
+
+    box_w = max(0.0, x2 - x1)
+    box_h = max(0.0, y2 - y1)
+    x_center = x1 + box_w / 2.0
+    y_center = y1 + box_h / 2.0
+
+    return np.array(
+        [
+            x_center / float(w),
+            y_center / float(h),
+            box_w / float(w),
+            box_h / float(h),
+        ],
+        dtype=np.float32,
+    )
+
+def format_yolo_row(class_id: int, coords_norm: np.ndarray) -> str:
+    """Format either an OBB row or a normal detection row."""
+    flat_coords = np.asarray(coords_norm, dtype=np.float32).reshape(-1)
+    expected_count = 8 if USE_OBB else 4
+
+    if len(flat_coords) != expected_count:
+        format_name = "OBB" if USE_OBB else "normal BB"
+        raise ValueError(
+            f"Expected {expected_count} coordinates for {format_name}, "
+            f"got {len(flat_coords)}"
+        )
+
+    values = [str(class_id)] + [f"{value:.6f}" for value in flat_coords]
+    return " ".join(values)
+
+def canonicalize_yolo_line(line: str):
+    """Normalize a row for duplicate checks in the selected output format."""
     parts = line.strip().split()
     if not parts:
         return None
@@ -345,22 +401,45 @@ def canonicalize_yolo_obb_line(line: str):
         # them as generated detections.
         return line.strip()
 
-    if len(coords) != 8:
+    expected_count = 8 if USE_OBB else 4
+    if len(coords) != expected_count:
         return line.strip()
 
     return " ".join(
         [str(class_id)] + [f"{value:.6f}" for value in coords]
     )
 
-def save_yolo_obb_txt(txt_path: Path, rows):
-    """Save detections according to output.label_write_mode.
-    Modes:
-      overwrite: replace the existing annotation file.
-      append: add every generated detection to the existing file.
-      append_unique: preserve existing annotations and add only rows that are not already present after normalization to six decimals.
-    """
+def validate_existing_label_format(txt_path: Path, existing_text: str):
+    """Prevent mixing OBB and normal-BB labels in one annotation file."""
+    expected_fields = 9 if USE_OBB else 5
+    expected_name = "OBB" if USE_OBB else "normal BB"
+
+    for line_number, raw_line in enumerate(existing_text.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        parts = line.split()
+        if len(parts) != expected_fields:
+            raise ValueError(
+                f"Existing label format mismatch in {txt_path}:{line_number}. "
+                f"output.use_obb={USE_OBB} expects {expected_fields} fields "
+                f"per row ({expected_name}), but found {len(parts)}. "
+                "Use a different output_label_dir or set "
+                "output.label_write_mode: overwrite when changing formats."
+            )
+
+        try:
+            [float(value) for value in parts]
+        except ValueError as error:
+            raise ValueError(
+                f"Non-numeric label row in {txt_path}:{line_number}: {line}"
+            ) from error
+
+def save_yolo_txt(txt_path: Path, rows):
+    """Save OBB or normal-BB detections according to the configured mode."""
     ensure_dir(txt_path.parent)
-    new_lines = [format_yolo_obb_row(class_id, pts_norm) for class_id, pts_norm in rows]
+    new_lines = [format_yolo_row(class_id, coords_norm) for class_id, coords_norm in rows]
 
     if LABEL_WRITE_MODE == "overwrite":
         with open(txt_path, "w", encoding="utf-8") as f:
@@ -371,17 +450,18 @@ def save_yolo_obb_txt(txt_path: Path, rows):
     existing_text = ""
     if txt_path.exists():
         existing_text = txt_path.read_text(encoding="utf-8")
+        validate_existing_label_format(txt_path, existing_text)
 
     if LABEL_WRITE_MODE == "append_unique":
         existing_rows = {
             canonical
             for line in existing_text.splitlines()
-            if (canonical := canonicalize_yolo_obb_line(line)) is not None
+            if (canonical := canonicalize_yolo_line(line)) is not None
         }
 
         filtered_lines = []
         for line in new_lines:
-            canonical = canonicalize_yolo_obb_line(line)
+            canonical = canonicalize_yolo_line(line)
             if canonical in existing_rows:
                 continue
             existing_rows.add(canonical)
@@ -401,6 +481,7 @@ def save_yolo_obb_txt(txt_path: Path, rows):
     return len(new_lines)
 
 def draw_overlay(image: np.ndarray, detections: list):
+    """Draw masks and either oriented or axis-aligned boxes."""
     out = image.copy()
 
     for det in detections:
@@ -409,19 +490,25 @@ def draw_overlay(image: np.ndarray, detections: list):
         label = det.get("label", str(cls_id))
         color = tuple(int(c) for c in det.get("color", (0, 255, 255)))
 
-        if "mask" in det and det["mask"] is not None:
+        if det.get("mask") is not None:
             mask = det["mask"]
             color_mask = np.zeros_like(out)
             color_mask[:, :, 1] = (mask > 0).astype(np.uint8) * 180
             out = cv2.addWeighted(out, 1.0, color_mask, 0.25, 0)
 
-        obb = det["obb"]
-        obb_i = obb.astype(np.int32).reshape((-1, 1, 2))
-        cv2.polylines(out, [obb_i], True, color, 2)
+        obb = det["obb"].astype(np.float32)
 
-        x, y = obb_i[0, 0]
+        if USE_OBB:
+            obb_i = obb.astype(np.int32).reshape((-1, 1, 2))
+            cv2.polylines(out, [obb_i], True, color, 2)
+            text_x, text_y = obb_i[0, 0]
+        else:
+            x1, y1, x2, y2 = obb_to_xyxy(obb).astype(np.int32)
+            cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
+            text_x, text_y = x1, y1
+
         text = f"{label} ({cls_id}) {score:.2f}"
-        cv2.putText(out, text, (int(x), int(y) - 8),
+        cv2.putText(out, text, (int(text_x), max(18, int(text_y) - 8)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
     return out
@@ -692,19 +779,27 @@ def merge_yolo_sam(yolo_dets, sam_dets, image_shape):
 
     return final_dets
 
-def convert_mask_detections_to_obb(detections, image_shape):
+def output_coords_from_obb(obb: np.ndarray, w: int, h: int) -> np.ndarray:
+    """Return normalized OBB or normal-BB coordinates from pixel OBB points."""
+    if USE_OBB:
+        return normalize_points(obb, w, h)
+
+    xyxy = obb_to_xyxy(obb)
+    return xyxy_to_normalized_xywh(xyxy, w, h)
+
+def convert_mask_detections(detections, image_shape):
     h, w = image_shape[:2]
     rows = []
     kept = []
 
     for det in detections:
         mask = det["mask"]
-        obb, area = mask_to_obb(mask)
+        obb, _ = mask_to_obb(mask)
         if obb is None:
             continue
 
-        obb_norm = normalize_points(obb, w, h)
-        rows.append((det["class_id"], obb_norm))
+        coords_norm = output_coords_from_obb(obb, w, h)
+        rows.append((det["class_id"], coords_norm))
 
         kept.append({
             "label": det["label"],
@@ -716,21 +811,21 @@ def convert_mask_detections_to_obb(detections, image_shape):
 
     return rows, kept
 
-def convert_direct_obb_detections(detections, image_shape):
+def convert_direct_detections(detections, image_shape):
     h, w = image_shape[:2]
     rows = []
     kept = []
 
     for det in detections:
         obb = det["obb"]
-        obb_norm = normalize_points(obb, w, h)
-        rows.append((det["class_id"], obb_norm))
+        coords_norm = output_coords_from_obb(obb, w, h)
+        rows.append((det["class_id"], coords_norm))
 
         kept.append({
             "label": det["label"],
             "class_id": det["class_id"],
             "score": det["score"],
-            "mask": det.get("mask", None),
+            "mask": det.get("mask"),
             "obb": obb,
         })
 
@@ -760,6 +855,7 @@ def main():
     if SAVE_VIZ:
         print("[INFO] Output visualizations:", OUTPUT_VIZ_DIR)
     print("[INFO] Label write mode:", LABEL_WRITE_MODE)
+    print("[INFO] Bounding-box format:", "OBB" if USE_OBB else "normal BB")
     print("[INFO] Number of images found:", len(image_paths))
     print(
         f"[INFO] YOLO26 enabled: {USE_YOLO26}; "
@@ -819,12 +915,12 @@ def main():
                 sam_dets.extend(prompt_dets)
 
         merged_mask_dets = merge_yolo_sam(yolo_seg_dets, sam_dets, image_bgr.shape)
-        mask_rows, mask_viz_dets = convert_mask_detections_to_obb(merged_mask_dets, image_bgr.shape)
+        mask_rows, mask_viz_dets = convert_mask_detections(merged_mask_dets, image_bgr.shape)
 
         aux_dets = []
         if yolo11_model is not None:
             aux_dets = get_yolo_aux_obbs(yolo11_model, image_bgr)
-        aux_rows, aux_viz_dets = convert_direct_obb_detections(aux_dets, image_bgr.shape)
+        aux_rows, aux_viz_dets = convert_direct_detections(aux_dets, image_bgr.shape)
 
         all_rows = mask_rows + aux_rows
         all_viz_dets = mask_viz_dets + aux_viz_dets
@@ -833,7 +929,7 @@ def main():
             img_path, DATASET_DIR, OUTPUT_LABEL_DIR, OUTPUT_VIZ_DIR
         )
 
-        added_rows = save_yolo_obb_txt(txt_path, all_rows)
+        added_rows = save_yolo_txt(txt_path, all_rows)
         if LABEL_WRITE_MODE != "overwrite":
             print(f"[INFO] Added {added_rows} new label row(s) to {txt_path.name}")
 
