@@ -71,14 +71,70 @@ docker compose build
 Or build a specific service:
 
 ```bash
-docker compose build part1
-docker compose build part2
+docker compose build frame_selection
+docker compose build part1_auto_labeling
+docker compose build part2_manual_labeling
 docker compose build training-stage1
 ```
 
+## Data structure
+
+The repository separates raw data, data being labeled, generated training datasets, and exported models.
+
+A typical workflow uses the following structure:
+
+```text
+data/
+├── rosbags/
+│   └── <rosbag_folder>/
+└── old_dataset/
+    ├── images/
+    │   ├── train/
+    │   ├── val/
+    │   └── test/
+    └── labels/
+        ├── train/
+        ├── val/
+        └── test/
+
+labeling_pipeline/
+└── dataset_to_label/
+    ├── images/
+    │   └── <sequence_or_rosbag_name>/
+    └── labels/
+        └── <sequence_or_rosbag_name>/
+
+training_pipeline/
+└── dataset_combined/
+    ├── images/
+    │   ├── train/
+    │   ├── val/
+    │   └── test/
+    └── labels/
+        ├── train/
+        ├── val/
+        └── test/
+
+trained_models/
+└── <exported_yolo_model>.pt
+```
+---
+The `data/` folder is used for input data and should be created manually, since it is not tracked by Git:
+
+| Folder | Description |
+|---|---|
+| `data/rosbags/` | Input folder for ROS 2 rosbags used by the frame-selection pipeline. |
+| `data/old_dataset/` | Previous dataset, already divided into `train`, `val`, and `test` if available. |
+---
+
+The main commands are summarized below. For configuration details and parameter explanations, use the specific README inside each pipeline folder.
+
+- [`labeling_pipeline/README.md`](labeling_pipeline/README.md): frame selection, automatic labeling, manual correction, and labeling configs.
+- [`training_pipeline/README.md`](training_pipeline/README.md): dataset merge/split, split registry, training, testing, and model export.
+
 ## Main workflow
 
-A typical full workflow is:
+A typical full workflow is after adding the `data/` folder:
 
 ```bash
 # 1. Optional: extract/select frames from ROS 2 rosbags
@@ -89,10 +145,14 @@ docker compose run --rm frame_selection_rosbag
 docker compose run --rm frame_selection_folder
 
 # 3. Automatic labeling
-docker compose run --rm part1
+docker compose run --rm part1_auto_labeling
 
 # 4. Manual correction
-docker compose run --rm part2
+# Check the display number first; it may not always be :1.
+export DISPLAY=:1
+xhost +local:
+docker compose run --rm part2_manual_labeling
+xhost -local:
 
 # 5. Merge old and new datasets into a stable train/val/test dataset
 docker compose run --rm merge_split_dataset

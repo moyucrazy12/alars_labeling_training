@@ -135,7 +135,7 @@ This stage combines:
 
 - [SAM 3](https://github.com/facebookresearch/sam3) prompt-based segmentation to generate object masks.
 - [YOLO segmentation/detection](https://docs.ultralytics.com/tasks/segment) models to find candidate objects in the image.
-- Optional custom [YOLO11 OBB](https://docs.ultralytics.com/tasks/obb/) models to include classes that are specific to the ALARS dataset.
+- Optional custom [YOLO11 OBB](https://docs.ultralytics.com/tasks/obb/) models to include classes that are specific to the ALARS dataset (trained_models folder).
 
 The output is a set of YOLO OBB label files, together with optional visualizations that can be checked before continuing to manual correction in Part 2.
 
@@ -148,7 +148,7 @@ labeling_pipeline/config/part1_parameters.yaml
 Run:
 
 ```bash
-docker compose run --rm part1
+docker compose run --rm part1_auto_labeling
 ```
 
 Typical input:
@@ -182,7 +182,7 @@ Before running the UI, allow Docker to use the display:
 ```bash
 export DISPLAY=:1
 xhost +local:
-docker compose run --rm part2
+docker compose run --rm part2_manual_labeling
 xhost -local:
 ```
 
