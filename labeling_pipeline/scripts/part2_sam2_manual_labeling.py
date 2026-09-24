@@ -221,23 +221,66 @@ def axis_aligned_box_from_quad(box4: np.ndarray) -> np.ndarray:
         np.max(box4[:, 1]),
     )
 
+def rectangle_from_quad(box4: np.ndarray):
+    box4 = np.asarray(box4, dtype=np.float32)
+    rect = cv2.minAreaRect(box4)
+    box = cv2.boxPoints(rect).astype(np.float32)
+    box = order_box_points_clockwise(box)
+    return rect, box
+
+def box_inside_image(box: np.ndarray, width: int, height: int, eps: float = 1e-3) -> bool:
+    return (
+        box[:, 0].min() >= -eps and
+        box[:, 1].min() >= -eps and
+        box[:, 0].max() <= width - 1 + eps and
+        box[:, 1].max() <= height - 1 + eps
+    )
+
+def force_rectangle_inside_image(box4: np.ndarray, width: int, height: int) -> np.ndarray:
+    """
+    Make sure the saved OBB is a true rectangle.
+
+    Important: do not independently clip OBB corners and save them directly,
+    because that can turn a rectangle into a parallelogram/trapezoid.
+    """
+    _, box = rectangle_from_quad(box4)
+
+    if box_inside_image(box, width, height):
+        box[:, 0] = np.clip(box[:, 0], 0, width - 1)
+        box[:, 1] = np.clip(box[:, 1], 0, height - 1)
+        return order_box_points_clockwise(box)
+
+    clipped = box.copy()
+    clipped[:, 0] = np.clip(clipped[:, 0], 0, width - 1)
+    clipped[:, 1] = np.clip(clipped[:, 1], 0, height - 1)
+
+    _, refit_box = rectangle_from_quad(clipped)
+
+    if box_inside_image(refit_box, width, height):
+        refit_box[:, 0] = np.clip(refit_box[:, 0], 0, width - 1)
+        refit_box[:, 1] = np.clip(refit_box[:, 1], 0, height - 1)
+        return order_box_points_clockwise(refit_box)
+
+    # Last safe fallback: save an axis-aligned rectangle.
+    return axis_aligned_box_from_quad(clipped)
+
 def build_box_metadata(box: np.ndarray, area=None, rectangularity=None, angle_deg=None):
-    box = order_box_points_clockwise(np.asarray(box, dtype=np.float32))
-    rect = quad_to_rect(box)
+    box = np.asarray(box, dtype=np.float32)
+    rect, rect_box = rectangle_from_quad(box)
     (_, _), (width, height), _ = rect
 
     if width <= 0 or height <= 0:
         return None
 
     if area is None:
-        area = float(cv2.contourArea(box.astype(np.float32)))
+        area = float(cv2.contourArea(rect_box.astype(np.float32)))
 
     long_side = max(width, height)
     short_side = min(width, height)
 
     result = {
         "rect": rect,
-        "box": box,
+        "box": rect_box,
         "area": float(area),
         "aspect_ratio": long_side / (short_side + 1e-6),
         "rectangularity": rectangularity,
